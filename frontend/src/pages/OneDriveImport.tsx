@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cloud, FolderInput, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import { api } from '../api/client';
 
@@ -11,21 +11,25 @@ interface ImportResult {
   imported_invoices: { id: number; number: string; file_name: string; supplier: string | null; total_amount: number }[];
 }
 
+interface OneDriveStatus {
+  configured: boolean;
+  share_url: string | null;
+  archive_subfolder: string;
+}
+
 const fmt = (n: number) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n);
 
 export default function OneDriveImport() {
   const qc = useQueryClient();
-  const [accessToken, setAccessToken] = useState('');
-  const [folderPath, setFolderPath] = useState('/Fatture');
-  const [archiveSubfolder, setArchiveSubfolder] = useState('archivio');
   const [result, setResult] = useState<ImportResult | null>(null);
 
+  const { data: status } = useQuery<OneDriveStatus>({
+    queryKey: ['onedrive-status'],
+    queryFn: () => api.get('/api/onedrive/status'),
+  });
+
   const importMut = useMutation({
-    mutationFn: () => api.post<ImportResult>('/api/onedrive/import', {
-      access_token: accessToken,
-      folder_path: folderPath,
-      archive_subfolder: archiveSubfolder,
-    }),
+    mutationFn: () => api.post<ImportResult>('/api/onedrive/import', {}),
     onSuccess: (data) => {
       setResult(data);
       qc.invalidateQueries({ queryKey: ['invoices'] });
@@ -40,46 +44,32 @@ export default function OneDriveImport() {
       </div>
 
       <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ marginBottom: '1rem' }}>Configurazione</h3>
-        <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
-          Inserisci il token di accesso Microsoft Graph e il percorso della cartella OneDrive
-          con le fatture. I file importati verranno spostati nella sottocartella di archivio.
-        </p>
-        <div className="form-group">
-          <label>Access Token (Microsoft Graph)</label>
-          <textarea
-            className="form-control"
-            rows={3}
-            value={accessToken}
-            onChange={(e) => setAccessToken(e.target.value)}
-            placeholder="Incolla qui il token di accesso..."
-            style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}
-          />
-          <small style={{ color: '#999' }}>
-            Ottieni il token da{' '}
-            <a href="https://developer.microsoft.com/en-us/graph/graph-explorer" target="_blank" rel="noreferrer">
-              Graph Explorer
-            </a>{' '}
-            con permesso Files.ReadWrite
-          </small>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-          <div className="form-group">
-            <label>Cartella OneDrive</label>
-            <input className="form-control" value={folderPath} onChange={(e) => setFolderPath(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Sottocartella archivio</label>
-            <input className="form-control" value={archiveSubfolder} onChange={(e) => setArchiveSubfolder(e.target.value)} />
-          </div>
-        </div>
-        <button
-          className="btn btn-primary"
-          onClick={() => importMut.mutate()}
-          disabled={!accessToken || importMut.isPending}
-        >
-          {importMut.isPending ? <><Loader size={16} className="spin" /> Importazione in corso...</> : <><FolderInput size={16} /> Importa Fatture</>}
-        </button>
+        <h3 style={{ marginBottom: '1rem' }}>Cartella OneDrive collegata</h3>
+        {status?.configured ? (
+          <>
+            <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
+              La cartella OneDrive è configurata. Clicca il pulsante per importare le fatture
+              (PDF, JPG, PNG). I file importati verranno spostati nella sottocartella <strong>"{status.archive_subfolder}"</strong>.
+              Le fatture duplicate vengono automaticamente saltate.
+            </p>
+            <button
+              className="btn btn-primary"
+              onClick={() => importMut.mutate()}
+              disabled={importMut.isPending}
+              style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
+            >
+              {importMut.isPending
+                ? <><Loader size={18} className="spin" /> Importazione in corso...</>
+                : <><FolderInput size={18} /> Importa Fatture da OneDrive</>
+              }
+            </button>
+          </>
+        ) : (
+          <p style={{ color: '#d97706' }}>
+            <AlertCircle size={16} style={{ verticalAlign: 'middle' }} /> Nessuna cartella OneDrive configurata.
+            Imposta la variabile d'ambiente <code>ONEDRIVE_SHARE_URL</code> con il link condiviso.
+          </p>
+        )}
       </div>
 
       {importMut.isError && (
@@ -134,6 +124,10 @@ export default function OneDriveImport() {
                 </tbody>
               </table>
             </>
+          )}
+
+          {result.total_files === 0 && (
+            <p style={{ color: '#666' }}>Nessun file trovato nella cartella OneDrive.</p>
           )}
 
           {result.errors.length > 0 && (

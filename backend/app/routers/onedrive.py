@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from datetime import date
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Invoice, InvoiceItem, Supplier, User
+from app.models import Invoice, InvoiceItem, User
 from app.auth import get_current_user, get_business_filter
 from app.routers.upload import (
     _extract_text_from_pdf,
@@ -31,11 +32,16 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 SUPPORTED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".bmp"}
 
+ONEDRIVE_SHARE_URL = os.getenv(
+    "ONEDRIVE_SHARE_URL",
+    "https://1drv.ms/f/c/6c8e1c4e55fae440/IgCdJdwCc888Tqb7O8gPdIsvAaJZZmEOE6A8zDm-Si3QGls",
+)
+ARCHIVE_SUBFOLDER = os.getenv("ONEDRIVE_ARCHIVE_SUBFOLDER", "archiviate")
 
-class OneDriveConfig(BaseModel):
-    access_token: str
-    folder_path: str = "/Fatture"
-    archive_subfolder: str = "archivio"
+
+class OneDriveImportRequest(BaseModel):
+    share_url: str | None = None
+    archive_subfolder: str | None = None
 
 
 class OneDriveImportResult(BaseModel):
@@ -46,66 +52,100 @@ class OneDriveImportResult(BaseModel):
     imported_invoices: list[dict] = []
 
 
-def _graph_headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+def _encode_sharing_url(url: str) -> str:
+    encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    return f"u!{encoded}"
 
 
-def _list_files(token: str, folder_path: str) -> list[dict]:
-    encoded = folder_path.replace(" ", "%20")
-    url = f"{GRAPH_BASE}/me/drive/root:{encoded}:/children"
-    r = httpx.get(url, headers=_graph_headers(token), timeout=30)
+def _list_shared_files(share_url: str) -> tuple[list[dict], str | None]:
+    share_id = _encode_sharing_url(share_url)
+    url = f"{GRAPH_BASE}/shares/{share_id}/driveItem/children"
+    r = httpx.get(url, timeout=30)
     if r.status_code == 404:
-        return []
+        return [], None
     if r.status_code != 200:
-        raise HTTPException(502, f"Errore OneDrive: {r.status_code} - {r.text[:200]}")
+        raise HTTPException(502, f"Errore OneDrive: {r.status_code} - {r.text[:300]}")
     data = r.json()
-    return [f for f in data.get("value", []) if not f.get("folder")]
+    all_items = data.get("value", [])
+    files = []
+    archive_folder_id = None
+    for item in all_items:
+        if item.get("folder"):
+            if item.get("name", "").lower() in ("archiviate", "archivio", "archive"):
+                archive_folder_id = item["id"]
+            continue
+        files.append(item)
+    return files, archive_folder_id
 
 
-def _download_file(token: str, item_id: str, dest_path: str) -> None:
-    url = f"{GRAPH_BASE}/me/drive/items/{item_id}/content"
-    r = httpx.get(url, headers=_graph_headers(token), follow_redirects=True, timeout=60)
+def _download_shared_file(file_item: dict, dest_path: str) -> None:
+    download_url = file_item.get("@microsoft.graph.downloadUrl") or file_item.get(
+        "@content.downloadUrl"
+    )
+    if not download_url:
+        item_id = file_item["id"]
+        parent = file_item.get("parentReference", {})
+        drive_id = parent.get("driveId", "")
+        if drive_id:
+            meta_url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+            r = httpx.get(meta_url, timeout=15)
+            if r.status_code == 200:
+                download_url = r.json().get("@microsoft.graph.downloadUrl")
+    if not download_url:
+        raise RuntimeError("URL di download non disponibile")
+    r = httpx.get(download_url, follow_redirects=True, timeout=60)
     if r.status_code != 200:
-        raise HTTPException(502, f"Errore download OneDrive: {r.status_code}")
+        raise RuntimeError(f"Errore download: {r.status_code}")
     with open(dest_path, "wb") as f:
         f.write(r.content)
 
 
-def _move_to_archive(token: str, item_id: str, folder_path: str, archive_subfolder: str) -> None:
-    archive_path = f"{folder_path}/{archive_subfolder}"
-    search_url = f"{GRAPH_BASE}/me/drive/root:{archive_path.replace(' ', '%20')}"
-    r = httpx.get(search_url, headers=_graph_headers(token), timeout=15)
-    if r.status_code == 404:
-        parent_path = folder_path.replace(" ", "%20")
-        create_url = f"{GRAPH_BASE}/me/drive/root:{parent_path}:/children"
-        r2 = httpx.post(
-            create_url,
-            headers={**_graph_headers(token), "Content-Type": "application/json"},
-            json={"name": archive_subfolder, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
+def _move_to_archive_folder(file_item: dict, archive_folder_id: str) -> None:
+    parent = file_item.get("parentReference", {})
+    drive_id = parent.get("driveId", "")
+    item_id = file_item["id"]
+    if not drive_id:
+        return
+    move_url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+    try:
+        httpx.patch(
+            move_url,
+            json={"parentReference": {"id": archive_folder_id}},
+            headers={"Content-Type": "application/json"},
             timeout=15,
         )
-        if r2.status_code not in (200, 201, 409):
-            return
-        r = httpx.get(search_url, headers=_graph_headers(token), timeout=15)
-    if r.status_code != 200:
-        return
-    archive_id = r.json()["id"]
-    move_url = f"{GRAPH_BASE}/me/drive/items/{item_id}"
-    httpx.patch(
-        move_url,
-        headers={**_graph_headers(token), "Content-Type": "application/json"},
-        json={"parentReference": {"id": archive_id}},
-        timeout=15,
-    )
+    except Exception:
+        pass
+
+
+@router.get("/status")
+def onedrive_status():
+    return {
+        "configured": bool(ONEDRIVE_SHARE_URL),
+        "share_url": ONEDRIVE_SHARE_URL or None,
+        "archive_subfolder": ARCHIVE_SUBFOLDER,
+    }
 
 
 @router.post("/import", response_model=OneDriveImportResult)
 def import_from_onedrive(
-    config: OneDriveConfig,
+    request: OneDriveImportRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    files = _list_files(config.access_token, config.folder_path)
+    share_url = ONEDRIVE_SHARE_URL
+    archive_sub = ARCHIVE_SUBFOLDER
+    if request:
+        if request.share_url:
+            share_url = request.share_url
+        if request.archive_subfolder:
+            archive_sub = request.archive_subfolder
+
+    if not share_url:
+        raise HTTPException(400, "Nessun link OneDrive configurato")
+
+    clean_url = share_url.split("?")[0]
+    files, archive_folder_id = _list_shared_files(clean_url)
     result = OneDriveImportResult(total_files=len(files))
 
     for file_info in files:
@@ -118,7 +158,7 @@ def import_from_onedrive(
         local_path = os.path.join(UPLOAD_DIR, f"onedrive_{item_id}{ext}")
 
         try:
-            _download_file(config.access_token, item_id, local_path)
+            _download_shared_file(file_info, local_path)
 
             if ext == ".pdf":
                 text = _extract_text_from_pdf(local_path)
@@ -142,7 +182,8 @@ def import_from_onedrive(
                 ).first()
                 if existing:
                     result.skipped_duplicate += 1
-                    _move_to_archive(config.access_token, item_id, config.folder_path, config.archive_subfolder)
+                    if archive_folder_id:
+                        _move_to_archive_folder(file_info, archive_folder_id)
                     continue
 
             inv_date = None
@@ -153,13 +194,12 @@ def import_from_onedrive(
                     pass
 
             biz_id = current_user.business_id
-            biz_filter = get_business_filter(current_user)
 
             invoice = Invoice(
                 number=inv_number,
                 date=inv_date or date.today(),
                 supplier_id=supplier_id,
-                business_id=biz_id if biz_filter is not None else biz_id,
+                business_id=biz_id,
                 total_amount=total_amount,
                 vat_amount=vat_amount or 0.0,
                 net_amount=(total_amount - (vat_amount or 0.0)) if total_amount else 0.0,
@@ -187,7 +227,8 @@ def import_from_onedrive(
                 "total_amount": total_amount,
             })
 
-            _move_to_archive(config.access_token, item_id, config.folder_path, config.archive_subfolder)
+            if archive_folder_id:
+                _move_to_archive_folder(file_info, archive_folder_id)
 
         except Exception as e:
             result.errors.append(f"{name}: {str(e)}")
