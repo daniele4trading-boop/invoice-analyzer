@@ -32,12 +32,14 @@ export default function Login() {
           <h1>Invoice Analyzer</h1>
           <p>Gestione Fatture & DDT</p>
         </div>
-        <form onSubmit={handleSubmit} className="login-form">
+        <form onSubmit={handleSubmit} className="login-form" autoComplete="on">
           {error && <div className="alert alert-error">{error}</div>}
           <div className="form-group">
             <label>Email</label>
             <input
               type="email"
+              name="email"
+              autoComplete="username"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="email@esempio.it"
@@ -50,6 +52,8 @@ export default function Login() {
             <div style={{ position: 'relative' }}>
               <input
                 type={showPassword ? 'text' : 'password'}
+                name="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Password"
