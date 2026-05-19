@@ -12,6 +12,7 @@ from app.routers import (
     price_quotes,
     analysis,
     export,
+    upload,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -37,6 +38,7 @@ app.include_router(delivery_notes.router)
 app.include_router(price_quotes.router)
 app.include_router(analysis.router)
 app.include_router(export.router)
+app.include_router(upload.router)
 
 # Serve frontend static files in production
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")

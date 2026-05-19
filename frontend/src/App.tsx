@@ -9,6 +9,7 @@ import {
   DollarSign,
   TrendingUp,
   FileSpreadsheet,
+  Upload,
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Suppliers from './pages/Suppliers';
@@ -18,6 +19,7 @@ import DeliveryNotes from './pages/DeliveryNotes';
 import PriceQuotes from './pages/PriceQuotes';
 import PriceComparison from './pages/PriceComparison';
 import Reports from './pages/Reports';
+import UploadInvoice from './pages/UploadInvoice';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -37,6 +39,10 @@ function App() {
             <nav className="sidebar-nav">
               <NavLink to="/" end>
                 <LayoutDashboard size={18} /> Dashboard
+              </NavLink>
+
+              <NavLink to="/upload">
+                <Upload size={18} /> Carica Fattura
               </NavLink>
 
               <div className="sidebar-section">Gestione</div>
@@ -74,6 +80,7 @@ function App() {
               <Route path="/delivery-notes" element={<DeliveryNotes />} />
               <Route path="/price-quotes" element={<PriceQuotes />} />
               <Route path="/price-comparison" element={<PriceComparison />} />
+              <Route path="/upload" element={<UploadInvoice />} />
               <Route path="/reports" element={<Reports />} />
             </Routes>
           </main>

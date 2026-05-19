@@ -464,3 +464,48 @@ select.form-control {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Upload zone */
+.upload-zone {
+  border: 2px dashed var(--gray-300);
+  transition: border-color 0.2s, background 0.2s;
+}
+.upload-zone:hover, .upload-zone.drag-over {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+/* Spinner */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Badge variants */
+.badge-green {
+  background: var(--success-light);
+  color: var(--success);
+}
+.badge-orange {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+.badge-red {
+  background: var(--danger-light);
+  color: var(--danger);
+}
+.btn-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+.btn-secondary {
+  background: var(--gray-100);
+  color: var(--gray-700);
+  border: 1px solid var(--gray-300);
+}
+.btn-secondary:hover {
+  background: var(--gray-200);
+}

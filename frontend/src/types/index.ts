@@ -126,6 +126,32 @@ export interface ConsumptionReport {
   unit?: string;
 }
 
+export interface ParsedInvoiceItem {
+  description: string;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+}
+
+export interface ParsedInvoiceData {
+  number: string | null;
+  date: string | null;
+  total_amount: number | null;
+  vat_amount: number | null;
+  net_amount: number | null;
+  supplier_vat_number: string | null;
+  supplier: { id: number; name: string; matched_by: string } | null;
+  items: ParsedInvoiceItem[];
+}
+
+export interface UploadResult {
+  file_path: string;
+  file_name: string;
+  extracted_text: string;
+  parsed_data: ParsedInvoiceData;
+  confidence: Record<string, string>;
+}
+
 export interface DashboardSummary {
   total_suppliers: number;
   total_products: number;
