@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import base64
+import json
 import os
-from datetime import date
+from datetime import date, datetime
+from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import Invoice, InvoiceItem, User
+from app.database import get_db, SessionLocal
+from app.models import AppSetting, Invoice, InvoiceItem, User
 from app.auth import get_current_user, get_business_filter
 from app.routers.upload import (
     _extract_text_from_pdf,
@@ -29,19 +31,17 @@ from app.routers.upload import (
 router = APIRouter(prefix="/api/onedrive", tags=["onedrive"])
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+MS_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0"
+SCOPES = "Files.ReadWrite.All offline_access"
+
+MS_CLIENT_ID = os.getenv("MS_CLIENT_ID", "")
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET", "")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://fatture.doppiozero.pizza")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".bmp"}
 
-ONEDRIVE_SHARE_URL = os.getenv(
-    "ONEDRIVE_SHARE_URL",
-    "https://1drv.ms/f/c/6c8e1c4e55fae440/IgCdJdwCc888Tqb7O8gPdIsvAaJZZmEOE6A8zDm-Si3QGls",
-)
+ONEDRIVE_FOLDER_PATH = os.getenv("ONEDRIVE_FOLDER_PATH", "/Fatture")
 ARCHIVE_SUBFOLDER = os.getenv("ONEDRIVE_ARCHIVE_SUBFOLDER", "archiviate")
-
-
-class OneDriveImportRequest(BaseModel):
-    share_url: str | None = None
-    archive_subfolder: str | None = None
 
 
 class OneDriveImportResult(BaseModel):
@@ -52,15 +52,79 @@ class OneDriveImportResult(BaseModel):
     imported_invoices: list[dict] = []
 
 
-def _encode_sharing_url(url: str) -> str:
-    encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    return f"u!{encoded}"
+def _get_setting(db: Session, key: str) -> str | None:
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    return row.value if row else None
 
 
-def _list_shared_files(share_url: str) -> tuple[list[dict], str | None]:
-    share_id = _encode_sharing_url(share_url)
-    url = f"{GRAPH_BASE}/shares/{share_id}/driveItem/children"
-    r = httpx.get(url, timeout=30)
+def _set_setting(db: Session, key: str, value: str) -> None:
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    if row:
+        row.value = value
+        row.updated_at = datetime.utcnow()
+    else:
+        db.add(AppSetting(key=key, value=value))
+    db.commit()
+
+
+def _get_valid_token(db: Session) -> str | None:
+    token_data_str = _get_setting(db, "onedrive_tokens")
+    if not token_data_str:
+        return None
+    token_data = json.loads(token_data_str)
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_at = token_data.get("expires_at", 0)
+
+    if datetime.utcnow().timestamp() < expires_at - 300:
+        return access_token
+
+    if not refresh_token:
+        return None
+    new_tokens = _refresh_access_token(refresh_token)
+    if not new_tokens:
+        return None
+    _store_tokens(db, new_tokens)
+    return new_tokens.get("access_token")
+
+
+def _refresh_access_token(refresh_token: str) -> dict | None:
+    if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
+        return None
+    r = httpx.post(
+        f"{MS_AUTH_URL}/token",
+        data={
+            "client_id": MS_CLIENT_ID,
+            "client_secret": MS_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+            "scope": SCOPES,
+        },
+        timeout=15,
+    )
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+
+def _store_tokens(db: Session, token_response: dict) -> None:
+    expires_in = token_response.get("expires_in", 3600)
+    data = {
+        "access_token": token_response["access_token"],
+        "refresh_token": token_response.get("refresh_token", ""),
+        "expires_at": datetime.utcnow().timestamp() + expires_in,
+    }
+    _set_setting(db, "onedrive_tokens", json.dumps(data))
+
+
+def _graph_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+
+def _list_files(token: str, folder_path: str) -> tuple[list[dict], str | None]:
+    encoded = folder_path.strip("/").replace(" ", "%20")
+    url = f"{GRAPH_BASE}/me/drive/root:/{encoded}:/children?$top=200"
+    r = httpx.get(url, headers=_graph_headers(token), timeout=30)
     if r.status_code == 404:
         return [], None
     if r.status_code != 200:
@@ -78,74 +142,117 @@ def _list_shared_files(share_url: str) -> tuple[list[dict], str | None]:
     return files, archive_folder_id
 
 
-def _download_shared_file(file_item: dict, dest_path: str) -> None:
-    download_url = file_item.get("@microsoft.graph.downloadUrl") or file_item.get(
-        "@content.downloadUrl"
-    )
-    if not download_url:
-        item_id = file_item["id"]
-        parent = file_item.get("parentReference", {})
-        drive_id = parent.get("driveId", "")
-        if drive_id:
-            meta_url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
-            r = httpx.get(meta_url, timeout=15)
-            if r.status_code == 200:
-                download_url = r.json().get("@microsoft.graph.downloadUrl")
-    if not download_url:
-        raise RuntimeError("URL di download non disponibile")
-    r = httpx.get(download_url, follow_redirects=True, timeout=60)
+def _download_file(token: str, item_id: str, dest_path: str) -> None:
+    url = f"{GRAPH_BASE}/me/drive/items/{item_id}/content"
+    r = httpx.get(url, headers=_graph_headers(token), follow_redirects=True, timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Errore download: {r.status_code}")
     with open(dest_path, "wb") as f:
         f.write(r.content)
 
 
-def _move_to_archive_folder(file_item: dict, archive_folder_id: str) -> None:
-    parent = file_item.get("parentReference", {})
-    drive_id = parent.get("driveId", "")
-    item_id = file_item["id"]
-    if not drive_id:
-        return
-    move_url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+def _move_to_archive(token: str, item_id: str, archive_folder_id: str) -> None:
+    url = f"{GRAPH_BASE}/me/drive/items/{item_id}"
     try:
         httpx.patch(
-            move_url,
+            url,
+            headers={**_graph_headers(token), "Content-Type": "application/json"},
             json={"parentReference": {"id": archive_folder_id}},
-            headers={"Content-Type": "application/json"},
             timeout=15,
         )
     except Exception:
         pass
 
 
+# --- OAuth2 endpoints ---
+
+@router.get("/auth")
+def onedrive_auth_redirect():
+    if not MS_CLIENT_ID:
+        raise HTTPException(400, "MS_CLIENT_ID non configurato. Vedi istruzioni setup.")
+    params = {
+        "client_id": MS_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": f"{APP_BASE_URL}/api/onedrive/callback",
+        "scope": SCOPES,
+        "response_mode": "query",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    return RedirectResponse(f"{MS_AUTH_URL}/authorize?{urlencode(params)}")
+
+
+@router.get("/callback")
+def onedrive_callback(code: str | None = None, error: str | None = None):
+    if error:
+        return RedirectResponse(f"/onedrive-import?error={error}")
+    if not code:
+        return RedirectResponse("/onedrive-import?error=no_code")
+
+    r = httpx.post(
+        f"{MS_AUTH_URL}/token",
+        data={
+            "client_id": MS_CLIENT_ID,
+            "client_secret": MS_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": f"{APP_BASE_URL}/api/onedrive/callback",
+            "grant_type": "authorization_code",
+            "scope": SCOPES,
+        },
+        timeout=15,
+    )
+    if r.status_code != 200:
+        return RedirectResponse(f"/onedrive-import?error=token_error")
+
+    db = SessionLocal()
+    try:
+        _store_tokens(db, r.json())
+    finally:
+        db.close()
+
+    return RedirectResponse("/onedrive-import?connected=true")
+
+
 @router.get("/status")
-def onedrive_status():
+def onedrive_status(db: Session = Depends(get_db)):
+    token = _get_valid_token(db)
+    oauth_configured = bool(MS_CLIENT_ID and MS_CLIENT_SECRET)
     return {
-        "configured": bool(ONEDRIVE_SHARE_URL),
-        "share_url": ONEDRIVE_SHARE_URL or None,
+        "connected": token is not None,
+        "oauth_configured": oauth_configured,
+        "folder_path": ONEDRIVE_FOLDER_PATH,
         "archive_subfolder": ARCHIVE_SUBFOLDER,
     }
 
 
-@router.post("/import", response_model=OneDriveImportResult)
-def import_from_onedrive(
-    request: OneDriveImportRequest | None = None,
+@router.post("/disconnect")
+def onedrive_disconnect(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    share_url = ONEDRIVE_SHARE_URL
-    archive_sub = ARCHIVE_SUBFOLDER
-    if request:
-        if request.share_url:
-            share_url = request.share_url
-        if request.archive_subfolder:
-            archive_sub = request.archive_subfolder
+    row = db.query(AppSetting).filter(AppSetting.key == "onedrive_tokens").first()
+    if row:
+        db.delete(row)
+        db.commit()
+    return {"disconnected": True}
 
-    if not share_url:
-        raise HTTPException(400, "Nessun link OneDrive configurato")
 
-    clean_url = share_url.split("?")[0]
-    files, archive_folder_id = _list_shared_files(clean_url)
+# --- Import endpoint ---
+
+@router.post("/import", response_model=OneDriveImportResult)
+def import_from_onedrive(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    token = _get_valid_token(db)
+    if not token:
+        raise HTTPException(
+            401,
+            "OneDrive non collegato. Clicca 'Collega OneDrive' per autorizzare l'accesso.",
+        )
+
+    folder_path = ONEDRIVE_FOLDER_PATH
+    files, archive_folder_id = _list_files(token, folder_path)
     result = OneDriveImportResult(total_files=len(files))
 
     for file_info in files:
@@ -158,7 +265,7 @@ def import_from_onedrive(
         local_path = os.path.join(UPLOAD_DIR, f"onedrive_{item_id}{ext}")
 
         try:
-            _download_shared_file(file_info, local_path)
+            _download_file(token, item_id, local_path)
 
             if ext == ".pdf":
                 text = _extract_text_from_pdf(local_path)
@@ -183,7 +290,7 @@ def import_from_onedrive(
                 if existing:
                     result.skipped_duplicate += 1
                     if archive_folder_id:
-                        _move_to_archive_folder(file_info, archive_folder_id)
+                        _move_to_archive(token, item_id, archive_folder_id)
                     continue
 
             inv_date = None
@@ -228,7 +335,7 @@ def import_from_onedrive(
             })
 
             if archive_folder_id:
-                _move_to_archive_folder(file_info, archive_folder_id)
+                _move_to_archive(token, item_id, archive_folder_id)
 
         except Exception as e:
             result.errors.append(f"{name}: {str(e)}")

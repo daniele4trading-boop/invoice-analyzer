@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Cloud, FolderInput, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { Cloud, FolderInput, CheckCircle, AlertCircle, Loader, Link2, Unlink } from 'lucide-react';
 import { api } from '../api/client';
 
 interface ImportResult {
@@ -12,8 +12,9 @@ interface ImportResult {
 }
 
 interface OneDriveStatus {
-  configured: boolean;
-  share_url: string | null;
+  connected: boolean;
+  oauth_configured: boolean;
+  folder_path: string;
   archive_subfolder: string;
 }
 
@@ -22,6 +23,19 @@ const fmt = (n: number) => new Intl.NumberFormat('it-IT', { style: 'currency', c
 export default function OneDriveImport() {
   const qc = useQueryClient();
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [connectMsg, setConnectMsg] = useState<string | null>(null);
+
+  const params = new URLSearchParams(window.location.search);
+  useEffect(() => {
+    if (params.get('connected') === 'true') {
+      setConnectMsg('OneDrive collegato con successo!');
+      window.history.replaceState({}, '', '/onedrive-import');
+      qc.invalidateQueries({ queryKey: ['onedrive-status'] });
+    } else if (params.get('error')) {
+      setConnectMsg(`Errore connessione: ${params.get('error')}`);
+      window.history.replaceState({}, '', '/onedrive-import');
+    }
+  }, []);
 
   const { data: status } = useQuery<OneDriveStatus>({
     queryKey: ['onedrive-status'],
@@ -37,38 +51,103 @@ export default function OneDriveImport() {
     },
   });
 
+  const disconnectMut = useMutation({
+    mutationFn: () => api.post('/api/onedrive/disconnect', {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['onedrive-status'] });
+      setResult(null);
+      setConnectMsg(null);
+    },
+  });
+
+  const handleConnect = () => {
+    window.location.href = '/api/onedrive/auth';
+  };
+
   return (
     <div>
       <div className="page-header">
         <h2><Cloud size={22} /> Importa da OneDrive</h2>
       </div>
 
+      {connectMsg && (
+        <div className="card" style={{
+          padding: '1rem 1.5rem',
+          marginBottom: '1rem',
+          borderColor: connectMsg.includes('successo') ? '#86efac' : '#fca5a5',
+          backgroundColor: connectMsg.includes('successo') ? '#f0fdf4' : '#fef2f2',
+        }}>
+          <p style={{
+            color: connectMsg.includes('successo') ? '#16a34a' : '#dc2626',
+            display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0,
+          }}>
+            {connectMsg.includes('successo')
+              ? <CheckCircle size={18} />
+              : <AlertCircle size={18} />
+            }
+            {connectMsg}
+          </p>
+        </div>
+      )}
+
       <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ marginBottom: '1rem' }}>Cartella OneDrive collegata</h3>
-        {status?.configured ? (
+        <h3 style={{ marginBottom: '1rem' }}>Connessione OneDrive</h3>
+
+        {!status?.oauth_configured ? (
+          <div style={{ color: '#d97706', padding: '1rem', background: '#fffbeb', borderRadius: '0.5rem' }}>
+            <p style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0 0 0.5rem 0' }}>
+              <AlertCircle size={16} /> <strong>Configurazione richiesta</strong>
+            </p>
+            <p style={{ margin: '0', fontSize: '0.9rem' }}>
+              Per utilizzare l'importazione da OneDrive, è necessario configurare un'app Microsoft Azure.
+              Imposta le variabili <code>MS_CLIENT_ID</code> e <code>MS_CLIENT_SECRET</code> nel file .env del backend.
+            </p>
+          </div>
+        ) : status?.connected ? (
+          <>
+            <p style={{ color: '#16a34a', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <CheckCircle size={16} /> OneDrive collegato
+            </p>
+            <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
+              Cartella: <strong>{status.folder_path}</strong> — I file importati verranno spostati nella
+              sottocartella <strong>"{status.archive_subfolder}"</strong>. Le fatture duplicate vengono automaticamente saltate.
+            </p>
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                onClick={() => importMut.mutate()}
+                disabled={importMut.isPending}
+                style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
+              >
+                {importMut.isPending
+                  ? <><Loader size={18} className="spin" /> Importazione in corso...</>
+                  : <><FolderInput size={18} /> Importa Fatture da OneDrive</>
+                }
+              </button>
+              <button
+                className="btn"
+                onClick={() => disconnectMut.mutate()}
+                disabled={disconnectMut.isPending}
+                style={{ fontSize: '0.9rem', padding: '0.5rem 1rem', background: '#fee2e2', color: '#dc2626', border: '1px solid #fca5a5' }}
+              >
+                <Unlink size={16} /> Scollega OneDrive
+              </button>
+            </div>
+          </>
+        ) : (
           <>
             <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
-              La cartella OneDrive è configurata. Clicca il pulsante per importare le fatture
-              (PDF, JPG, PNG). I file importati verranno spostati nella sottocartella <strong>"{status.archive_subfolder}"</strong>.
-              Le fatture duplicate vengono automaticamente saltate.
+              Collega il tuo account OneDrive per importare le fatture direttamente dalla cartella condivisa.
+              L'autorizzazione richiede il tuo account Microsoft.
             </p>
             <button
               className="btn btn-primary"
-              onClick={() => importMut.mutate()}
-              disabled={importMut.isPending}
+              onClick={handleConnect}
               style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
             >
-              {importMut.isPending
-                ? <><Loader size={18} className="spin" /> Importazione in corso...</>
-                : <><FolderInput size={18} /> Importa Fatture da OneDrive</>
-              }
+              <Link2 size={18} /> Collega OneDrive
             </button>
           </>
-        ) : (
-          <p style={{ color: '#d97706' }}>
-            <AlertCircle size={16} style={{ verticalAlign: 'middle' }} /> Nessuna cartella OneDrive configurata.
-            Imposta la variabile d'ambiente <code>ONEDRIVE_SHARE_URL</code> con il link condiviso.
-          </p>
         )}
       </div>
 
