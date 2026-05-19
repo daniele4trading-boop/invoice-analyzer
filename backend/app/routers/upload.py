@@ -474,8 +474,11 @@ async def upload_and_parse(
     if supplier_match:
         supplier_confidence = supplier_match.get("confidence", "none")
 
+    file_url = f"/uploads/{saved_name}"
+
     return {
         "file_path": saved_path,
+        "file_url": file_url,
         "file_name": file.filename,
         "extracted_text": text[:3000],
         "parsed_data": {
@@ -516,6 +519,7 @@ async def create_supplier_from_upload(
         name=name,
         vat_number=data.get("vat_number"),
         address=data.get("address"),
+        email=data.get("email"),
     )
     db.add(supplier)
     db.commit()
@@ -580,3 +584,29 @@ async def save_invoice_template(
 
     db.commit()
     return {"saved": True}
+
+
+@router.post("/create-product")
+async def create_product_from_upload(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a new product from data extracted during invoice upload."""
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Nome prodotto obbligatorio")
+
+    existing = db.query(Product).filter(Product.name == name).first()
+    if existing:
+        return {"id": existing.id, "name": existing.name, "created": False}
+
+    product = Product(
+        name=name,
+        unit=data.get("unit"),
+        code=data.get("code"),
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return {"id": product.id, "name": product.name, "created": True}
