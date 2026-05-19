@@ -1,3 +1,4 @@
+import { useState, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -14,6 +15,8 @@ import {
   Store,
   UserCog,
   FolderInput,
+  Menu,
+  X,
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Suppliers from './pages/Suppliers';
@@ -72,6 +75,14 @@ function UserBar() {
 
 function AppLayout() {
   const { user, loading } = useAuth();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  // Close sidebar on route change (mobile navigation)
+  const handleNavClick = useCallback(() => {
+    setSidebarOpen(false);
+  }, []);
 
   if (loading) {
     return <div className="loading-page">Caricamento...</div>;
@@ -90,54 +101,58 @@ function AppLayout() {
 
   return (
     <div className="app-layout">
-      <aside className="sidebar">
+      {sidebarOpen && <div className="sidebar-overlay" onClick={closeSidebar} />}
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
+        <button className="sidebar-close" onClick={closeSidebar}>
+          <X size={24} />
+        </button>
         <div className="sidebar-logo">
           <h1>Invoice Analyzer</h1>
           <p>Gestione Fatture & DDT</p>
         </div>
         <nav className="sidebar-nav">
-          <NavLink to="/" end>
+          <NavLink to="/" end onClick={handleNavClick}>
             <LayoutDashboard size={18} /> Dashboard
           </NavLink>
-          <NavLink to="/upload">
+          <NavLink to="/upload" onClick={handleNavClick}>
             <Upload size={18} /> Carica Fattura
           </NavLink>
-          <NavLink to="/bulk-import">
+          <NavLink to="/bulk-import" onClick={handleNavClick}>
             <FolderInput size={18} /> Importa Multipla
           </NavLink>
 
           <div className="sidebar-section">Gestione</div>
-          <NavLink to="/suppliers">
+          <NavLink to="/suppliers" onClick={handleNavClick}>
             <Users size={18} /> Fornitori
           </NavLink>
-          <NavLink to="/products">
+          <NavLink to="/products" onClick={handleNavClick}>
             <Package size={18} /> Prodotti
           </NavLink>
-          <NavLink to="/invoices">
+          <NavLink to="/invoices" onClick={handleNavClick}>
             <FileText size={18} /> Fatture
           </NavLink>
-          <NavLink to="/delivery-notes">
+          <NavLink to="/delivery-notes" onClick={handleNavClick}>
             <Truck size={18} /> Bolle (DDT)
           </NavLink>
-          <NavLink to="/price-quotes">
+          <NavLink to="/price-quotes" onClick={handleNavClick}>
             <DollarSign size={18} /> Preventivi
           </NavLink>
 
           <div className="sidebar-section">Analisi</div>
-          <NavLink to="/price-comparison">
+          <NavLink to="/price-comparison" onClick={handleNavClick}>
             <TrendingUp size={18} /> Confronto Prezzi
           </NavLink>
-          <NavLink to="/reports">
+          <NavLink to="/reports" onClick={handleNavClick}>
             <FileSpreadsheet size={18} /> Report
           </NavLink>
 
           {isMaster && (
             <>
               <div className="sidebar-section">Amministrazione</div>
-              <NavLink to="/businesses">
+              <NavLink to="/businesses" onClick={handleNavClick}>
                 <Store size={18} /> Negozi
               </NavLink>
-              <NavLink to="/user-management">
+              <NavLink to="/user-management" onClick={handleNavClick}>
                 <UserCog size={18} /> Utenti
               </NavLink>
             </>
@@ -146,6 +161,9 @@ function AppLayout() {
       </aside>
       <main className="main-content">
         <header className="top-bar">
+          <button className="hamburger-btn" onClick={() => setSidebarOpen(true)}>
+            <Menu size={24} />
+          </button>
           <UserBar />
         </header>
         <div className="page-content">
