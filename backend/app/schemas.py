@@ -184,6 +184,24 @@ class InvoiceCreate(InvoiceBase):
     items: list[InvoiceItemCreate] = []
 
 
+class InvoiceUpdate(BaseModel):
+    number: Optional[str] = None
+    date: Optional[date] = None
+    supplier_id: Optional[int] = None
+    business_id: Optional[int] = None
+    total_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
+    net_amount: Optional[float] = None
+    notes: Optional[str] = None
+    items: Optional[list[InvoiceItemCreate]] = None
+
+
+class DuplicateCheckOut(BaseModel):
+    is_duplicate: bool
+    existing_invoice_id: Optional[int] = None
+    message: Optional[str] = None
+
+
 class InvoiceOut(InvoiceBase):
     id: int
     file_path: Optional[str] = None

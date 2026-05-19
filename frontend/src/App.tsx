@@ -13,6 +13,7 @@ import {
   LogOut,
   Store,
   UserCog,
+  Cloud,
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Suppliers from './pages/Suppliers';
@@ -26,6 +27,7 @@ import UploadInvoice from './pages/UploadInvoice';
 import Login from './pages/Login';
 import UserManagement from './pages/UserManagement';
 import BusinessManagement from './pages/BusinessManagement';
+import OneDriveImport from './pages/OneDriveImport';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import './index.css';
 
@@ -100,6 +102,9 @@ function AppLayout() {
           <NavLink to="/upload">
             <Upload size={18} /> Carica Fattura
           </NavLink>
+          <NavLink to="/onedrive-import">
+            <Cloud size={18} /> Importa OneDrive
+          </NavLink>
 
           <div className="sidebar-section">Gestione</div>
           <NavLink to="/suppliers">
@@ -153,6 +158,7 @@ function AppLayout() {
             <Route path="/price-quotes" element={<PriceQuotes />} />
             <Route path="/price-comparison" element={<PriceComparison />} />
             <Route path="/upload" element={<UploadInvoice />} />
+            <Route path="/onedrive-import" element={<OneDriveImport />} />
             <Route path="/reports" element={<Reports />} />
             {isMaster && <Route path="/businesses" element={<BusinessManagement />} />}
             {isMaster && <Route path="/user-management" element={<UserManagement />} />}

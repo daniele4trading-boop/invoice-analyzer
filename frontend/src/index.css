@@ -539,6 +539,14 @@ select.form-control {
   padding: 2rem;
 }
 .login-form .form-group { margin-bottom: 1.25rem; }
+.alert-warning {
+  background: var(--warning-light);
+  color: var(--warning);
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
 .alert-error {
   background: var(--danger-light);
   color: var(--danger);

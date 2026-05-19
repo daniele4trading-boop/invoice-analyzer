@@ -17,6 +17,7 @@ from app.routers import (
     analysis,
     export,
     upload,
+    onedrive,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -44,6 +45,7 @@ app.include_router(price_quotes.router)
 app.include_router(analysis.router)
 app.include_router(export.router)
 app.include_router(upload.router)
+app.include_router(onedrive.router)
 
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 if os.path.isdir(static_dir):
