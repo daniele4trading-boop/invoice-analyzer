@@ -15,6 +15,8 @@ from app.schemas import (
     BusinessCreate,
     BusinessOut,
 )
+from datetime import timedelta
+
 from app.auth import (
     hash_password,
     verify_password,
@@ -36,7 +38,8 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         )
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account disattivato")
-    token = create_access_token({"sub": str(user.id)})
+    expires = timedelta(days=30) if data.remember_me else None
+    token = create_access_token({"sub": str(user.id)}, expires_delta=expires)
     return TokenResponse(access_token=token)
 
 

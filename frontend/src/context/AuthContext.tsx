@@ -8,7 +8,7 @@ interface AuthContextType {
   businesses: Business[];
   selectedBusinessId: number | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   logout: () => void;
   selectBusiness: (id: number | null) => void;
   refreshUser: () => Promise<UserMe | null>;
@@ -56,8 +56,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const login = async (email: string, password: string) => {
-    const res = await api.post<{ access_token: string }>('/api/auth/login', { email, password });
+  const login = async (email: string, password: string, rememberMe?: boolean) => {
+    const res = await api.post<{ access_token: string }>('/api/auth/login', { email, password, remember_me: rememberMe || false });
     setToken(res.access_token);
     const u = await fetchUser();
     await fetchBusinesses();
