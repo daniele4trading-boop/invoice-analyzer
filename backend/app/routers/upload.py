@@ -49,6 +49,7 @@ VAT_NUMBER_PATTERNS = [
     re.compile(r"\b(IT\d{11})\b"),
 ]
 
+# Generic: description qty price total
 PRODUCT_LINE_PATTERN = re.compile(
     r"^(.{3,40}?)\s+"
     r"(\d+(?:[.,]\d+)?)\s+"
@@ -56,6 +57,49 @@ PRODUCT_LINE_PATTERN = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*$",
     re.MULTILINE,
 )
+
+# Partesa-style: CODE ZONE DESCRIPTION COLLI QxC UM PRICE [DISCOUNT] TOTAL [IVA]
+PARTESA_LINE_PATTERN = re.compile(
+    r"^[A-Z0-9]{3,8}\s+"           # codice articolo
+    r"[A-Z]\d{1,3}\s+"             # zona fiscale (es. Z38)
+    r"(.{5,60}?)\s+"               # descrizione prodotto
+    r"(\d+)\s+"                    # colli
+    r"(\d+)\s+"                    # QxC (pezzi per collo)
+    r"[A-Z]{2,4}\s+"              # UM (unità misura: KAR, PZ, ecc)
+    r"(\d+[.,]\d+)\s+"            # prezzo unitario
+    r"(?:\d+[.,]?\d*\s+)?"        # sconto (opzionale)
+    r"(\d+[.,]\d+)",              # totale netto
+    re.MULTILINE,
+)
+
+# Common structured: CODE DESCRIPTION QTY PRICE TOTAL (many distributor formats)
+STRUCTURED_LINE_PATTERN = re.compile(
+    r"^[A-Z0-9]{2,10}\s+"          # codice articolo
+    r"(.{5,60}?)\s+"               # descrizione
+    r"(\d+(?:[.,]\d+)?)\s+"        # quantità
+    r"[A-Z]{1,4}\s+"               # unità misura
+    r"(\d+[.,]\d+)\s+"             # prezzo unitario
+    r"(?:[\d.,]+\s+)?"             # sconto opzionale
+    r"(\d+[.,]\d+)",               # totale
+    re.MULTILINE,
+)
+
+# Tab/space-separated with clear numeric columns at end
+WIDE_TABLE_PATTERN = re.compile(
+    r"^(.{5,50}?)\s{2,}"           # descrizione (followed by 2+ spaces)
+    r"(\d+(?:[.,]\d+)?)\s+"        # quantità
+    r"(?:[A-Z]{1,5}\s+)?"          # UM opzionale
+    r"(\d+[.,]\d+)\s+"             # prezzo
+    r"(?:[\d.,]+%?\s+)?"           # sconto opzionale
+    r"(\d+[.,]\d+)",               # totale
+    re.MULTILINE,
+)
+
+SKIP_DESCRIPTIONS = {
+    "TOTALE", "SUBTOTALE", "SUB TOTALE", "IVA", "IMPONIBILE",
+    "SCONTO", "ARROTONDAMENTO", "SPESE", "CONTRIBUTI", "BOLLO",
+    "TRASPORTO", "IMBALLO", "ACCONTO", "SALDO", "NETTO",
+}
 
 
 def _parse_italian_number(s: str) -> float:
@@ -141,11 +185,79 @@ def _find_vat_number(text: str) -> str | None:
     return None
 
 
+def _should_skip(desc: str) -> bool:
+    d = desc.strip().upper()
+    return len(d) < 3 or any(skip in d for skip in SKIP_DESCRIPTIONS)
+
+
 def _find_line_items(text: str) -> list[dict]:
     items: list[dict] = []
+
+    # Try Partesa-style first (most specific)
+    for match in PARTESA_LINE_PATTERN.finditer(text):
+        desc = match.group(1).strip()
+        if _should_skip(desc):
+            continue
+        try:
+            colli = _parse_italian_number(match.group(2))
+            qty_per_collo = _parse_italian_number(match.group(3))
+            price = _parse_italian_number(match.group(4))
+            total = _parse_italian_number(match.group(5))
+            items.append({
+                "description": desc,
+                "quantity": colli * qty_per_collo,
+                "unit_price": price,
+                "total_price": total,
+            })
+        except ValueError:
+            continue
+    if items:
+        return items
+
+    # Try structured format (CODE DESC QTY UM PRICE TOTAL)
+    for match in STRUCTURED_LINE_PATTERN.finditer(text):
+        desc = match.group(1).strip()
+        if _should_skip(desc):
+            continue
+        try:
+            qty = _parse_italian_number(match.group(2))
+            price = _parse_italian_number(match.group(3))
+            total = _parse_italian_number(match.group(4))
+            items.append({
+                "description": desc,
+                "quantity": qty,
+                "unit_price": price,
+                "total_price": total,
+            })
+        except ValueError:
+            continue
+    if items:
+        return items
+
+    # Try wide table format
+    for match in WIDE_TABLE_PATTERN.finditer(text):
+        desc = match.group(1).strip()
+        if _should_skip(desc):
+            continue
+        try:
+            qty = _parse_italian_number(match.group(2))
+            price = _parse_italian_number(match.group(3))
+            total = _parse_italian_number(match.group(4))
+            items.append({
+                "description": desc,
+                "quantity": qty,
+                "unit_price": price,
+                "total_price": total,
+            })
+        except ValueError:
+            continue
+    if items:
+        return items
+
+    # Fallback: generic pattern
     for match in PRODUCT_LINE_PATTERN.finditer(text):
         desc = match.group(1).strip()
-        if len(desc) < 3 or desc.upper() in ("TOTALE", "SUBTOTALE", "IVA", "IMPONIBILE"):
+        if _should_skip(desc):
             continue
         try:
             qty = _parse_italian_number(match.group(2))
@@ -174,6 +286,7 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _match_supplier(vat_number: str | None, text: str, db: Session) -> dict | None:
+    # 1. Match by P.IVA (most reliable)
     if vat_number:
         supplier = db.query(Supplier).filter(Supplier.vat_number == vat_number).first()
         if supplier:
@@ -182,12 +295,23 @@ def _match_supplier(vat_number: str | None, text: str, db: Session) -> dict | No
     suppliers = db.query(Supplier).all()
     text_lower = text.lower()
 
-    # Exact name match
+    # 2. Exact name match in text
     for s in suppliers:
-        if s.name and s.name.lower() in text_lower:
+        if s.name and len(s.name) >= 3 and s.name.lower() in text_lower:
             return {"id": s.id, "name": s.name, "matched_by": "name", "confidence": "high"}
 
-    # Fuzzy name match against extracted supplier name from text
+    # 3. Match by email domain or address fragments (for logo-only names)
+    for s in suppliers:
+        if s.email:
+            domain = s.email.split('@')[-1].split('.')[0].lower()
+            if len(domain) >= 4 and domain in text_lower:
+                return {"id": s.id, "name": s.name, "matched_by": "email_domain", "confidence": "medium"}
+        if s.address and len(s.address) > 10:
+            addr_parts = [p.strip().lower() for p in s.address.split(',') if len(p.strip()) > 5]
+            if any(part in text_lower for part in addr_parts):
+                return {"id": s.id, "name": s.name, "matched_by": "address", "confidence": "medium"}
+
+    # 4. Fuzzy name match against extracted supplier name from text
     supplier_name = _extract_supplier_name(text)
     if supplier_name:
         best_match = None
@@ -204,21 +328,22 @@ def _match_supplier(vat_number: str | None, text: str, db: Session) -> dict | No
                 "score": round(best_score, 2),
                 "extracted_name": supplier_name,
             }
-        if supplier_name:
-            return {
-                "id": None, "name": None,
-                "matched_by": "not_found", "confidence": "none",
-                "extracted_name": supplier_name,
-                "extracted_vat": vat_number,
-            }
 
-    return None
+    # 5. Not found — return extracted info for user to create
+    extracted = supplier_name or _extract_supplier_name_fallback(text)
+    return {
+        "id": None, "name": None,
+        "matched_by": "not_found", "confidence": "none",
+        "extracted_name": extracted,
+        "extracted_vat": vat_number,
+    }
 
 
 def _extract_supplier_name(text: str) -> str | None:
     """Try to extract the supplier/company name from invoice text."""
     patterns = [
-        re.compile(r"(?:ragione\s*sociale|ditta|spett\.?le|da|from|emittente)\s*[:.]?\s*(.+?)\n", re.IGNORECASE),
+        re.compile(r"(?:ragione\s*sociale|denominazione)\s*[:.]?\s*(.+?)(?:\n|$)", re.IGNORECASE),
+        re.compile(r"(?:ditta|spett\.?le|emittente)\s*[:.]?\s*(.+?)(?:\n|$)", re.IGNORECASE),
     ]
     for p in patterns:
         m = p.search(text)
@@ -226,11 +351,26 @@ def _extract_supplier_name(text: str) -> str | None:
             name = m.group(1).strip()
             if len(name) > 2:
                 return name
-    # Fallback: first non-empty line that looks like a company name
-    for line in text.split('\n')[:10]:
+
+    # Look for company name patterns (S.R.L., SPA, etc.)
+    for line in text.split('\n')[:15]:
         line = line.strip()
-        if len(line) > 5 and not re.match(r'^\d', line) and not re.match(r'(?:fattura|invoice|data|date|n\.?|nr)', line, re.IGNORECASE):
-            if any(kw in line.lower() for kw in ['s.r.l', 'srl', 's.p.a', 'spa', 's.a.s', 'sas', 's.n.c', 'snc', 'di ', 'soc.']):
+        if len(line) < 5 or len(line) > 80:
+            continue
+        if re.match(r'^\d', line) or re.match(r'(?:fattura|invoice|data|date|n[.°]|nr|documento|pag)', line, re.IGNORECASE):
+            continue
+        if any(kw in line.lower() for kw in ['s.r.l', 'srl', 's.p.a', 'spa', 's.a.s', 'sas', 's.n.c', 'snc', 'soc.', 'group', 'italia']):
+            return line
+    return None
+
+
+def _extract_supplier_name_fallback(text: str) -> str | None:
+    """Last-resort extraction: look for a clean text line near the top of the document."""
+    lines = text.split('\n')
+    for line in lines[:8]:
+        line = line.strip()
+        if len(line) >= 4 and not re.match(r'^[\d\s.,/\-]+$', line):
+            if not re.match(r'(?:fattura|invoice|data|date|n[.°]|nr|pag|cod|tel|fax|email|via|cap)', line, re.IGNORECASE):
                 return line
     return None
 
