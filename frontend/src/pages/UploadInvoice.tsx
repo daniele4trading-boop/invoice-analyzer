@@ -48,19 +48,7 @@ export default function UploadInvoice() {
   });
 
   const uploadMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await fetch('/api/upload/parse', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || 'Errore upload');
-      }
-      return res.json() as Promise<UploadResult>;
-    },
+    mutationFn: (file: File) => api.upload<UploadResult>('/api/upload/parse', file),
     onSuccess: (data) => {
       setResult(data);
       setSaved(false);

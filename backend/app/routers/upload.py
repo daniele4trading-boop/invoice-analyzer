@@ -12,7 +12,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Supplier
+from app.models import Supplier, User
+from app.auth import get_current_user
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -176,6 +177,7 @@ def _match_supplier(vat_number: str | None, text: str, db: Session) -> dict | No
 @router.post("/parse")
 async def upload_and_parse(
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not file.filename:

@@ -1,3 +1,34 @@
+export interface Business {
+  id: number;
+  name: string;
+  address?: string;
+  vat_number?: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  created_at: string;
+}
+
+export interface UserMe {
+  id: number;
+  email: string;
+  full_name: string;
+  role: 'master' | 'store_manager';
+  business_id?: number | null;
+  business?: Business | null;
+}
+
+export interface UserOut {
+  id: number;
+  email: string;
+  full_name: string;
+  role: string;
+  business_id?: number | null;
+  is_active: boolean;
+  created_at: string;
+  business?: Business | null;
+}
+
 export interface Supplier {
   id: number;
   name: string;
@@ -27,7 +58,7 @@ export interface Product {
 
 export interface InvoiceItem {
   id: number;
-  product_id: number;
+  product_id?: number;
   description?: string;
   quantity: number;
   unit_price: number;
@@ -41,6 +72,7 @@ export interface Invoice {
   number: string;
   date: string;
   supplier_id: number;
+  business_id?: number | null;
   total_amount: number;
   vat_amount?: number;
   net_amount?: number;
@@ -49,12 +81,13 @@ export interface Invoice {
   created_at: string;
   updated_at: string;
   supplier?: Supplier;
+  business?: Business | null;
   items: InvoiceItem[];
 }
 
 export interface DeliveryNoteItem {
   id: number;
-  product_id: number;
+  product_id?: number;
   description?: string;
   quantity: number;
   unit?: string;
@@ -66,10 +99,12 @@ export interface DeliveryNote {
   number: string;
   date: string;
   supplier_id: number;
+  business_id?: number | null;
   notes?: string;
   file_path?: string;
   created_at: string;
   supplier?: Supplier;
+  business?: Business | null;
   items: DeliveryNoteItem[];
 }
 
@@ -77,6 +112,7 @@ export interface PriceQuote {
   id: number;
   supplier_id: number;
   product_id: number;
+  business_id?: number | null;
   quoted_price: number;
   valid_from: string;
   valid_to?: string;
@@ -84,6 +120,7 @@ export interface PriceQuote {
   created_at: string;
   supplier?: Supplier;
   product?: Product;
+  business?: Business | null;
 }
 
 export interface SupplierAnalysis {

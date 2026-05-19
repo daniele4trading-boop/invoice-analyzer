@@ -3,6 +3,78 @@ from pydantic import BaseModel
 from typing import Optional
 
 
+# --- Auth ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+# --- Business ---
+class BusinessBase(BaseModel):
+    name: str
+    address: Optional[str] = None
+    vat_number: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class BusinessCreate(BusinessBase):
+    pass
+
+
+class BusinessOut(BusinessBase):
+    id: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --- User ---
+class UserBase(BaseModel):
+    email: str
+    full_name: str
+    role: str = "store_manager"
+    business_id: Optional[int] = None
+
+
+class UserCreate(UserBase):
+    password: str
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    business_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+
+
+class UserOut(UserBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    business: Optional[BusinessOut] = None
+
+    model_config = {"from_attributes": True}
+
+
+class UserMeOut(BaseModel):
+    id: int
+    email: str
+    full_name: str
+    role: str
+    business_id: Optional[int] = None
+    business: Optional[BusinessOut] = None
+
+    model_config = {"from_attributes": True}
+
+
 # --- Supplier ---
 class SupplierBase(BaseModel):
     name: str
@@ -77,7 +149,7 @@ class ProductOut(ProductBase):
 
 # --- Invoice Item ---
 class InvoiceItemBase(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
     description: Optional[str] = None
     quantity: float
     unit_price: float
@@ -101,6 +173,7 @@ class InvoiceBase(BaseModel):
     number: str
     date: date
     supplier_id: int
+    business_id: Optional[int] = None
     total_amount: float
     vat_amount: Optional[float] = 0.0
     net_amount: Optional[float] = 0.0
@@ -117,6 +190,7 @@ class InvoiceOut(InvoiceBase):
     created_at: datetime
     updated_at: datetime
     supplier: Optional[SupplierOut] = None
+    business: Optional[BusinessOut] = None
     items: list[InvoiceItemOut] = []
 
     model_config = {"from_attributes": True}
@@ -124,7 +198,7 @@ class InvoiceOut(InvoiceBase):
 
 # --- Delivery Note Item ---
 class DeliveryNoteItemBase(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
     description: Optional[str] = None
     quantity: float
     unit: Optional[str] = None
@@ -146,6 +220,7 @@ class DeliveryNoteBase(BaseModel):
     number: str
     date: date
     supplier_id: int
+    business_id: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -158,6 +233,7 @@ class DeliveryNoteOut(DeliveryNoteBase):
     file_path: Optional[str] = None
     created_at: datetime
     supplier: Optional[SupplierOut] = None
+    business: Optional[BusinessOut] = None
     items: list[DeliveryNoteItemOut] = []
 
     model_config = {"from_attributes": True}
@@ -167,6 +243,7 @@ class DeliveryNoteOut(DeliveryNoteBase):
 class PriceQuoteBase(BaseModel):
     supplier_id: int
     product_id: int
+    business_id: Optional[int] = None
     quoted_price: float
     valid_from: date
     valid_to: Optional[date] = None
@@ -182,6 +259,7 @@ class PriceQuoteOut(PriceQuoteBase):
     created_at: datetime
     supplier: Optional[SupplierOut] = None
     product: Optional[ProductOut] = None
+    business: Optional[BusinessOut] = None
 
     model_config = {"from_attributes": True}
 
