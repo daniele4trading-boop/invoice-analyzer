@@ -27,7 +27,14 @@ def list_invoices(
         query = query.filter(Invoice.date >= date_from)
     if date_to:
         query = query.filter(Invoice.date <= date_to)
-    return query.order_by(Invoice.date.desc()).offset(skip).limit(limit).unique().all()
+    results = query.order_by(Invoice.date.desc()).offset(skip).limit(limit).all()
+    seen: set[int] = set()
+    unique = []
+    for inv in results:
+        if inv.id not in seen:
+            seen.add(inv.id)
+            unique.append(inv)
+    return unique
 
 
 @router.post("/", response_model=InvoiceOut, status_code=201)

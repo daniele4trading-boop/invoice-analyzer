@@ -37,9 +37,15 @@ def get_dashboard(db: Session = Depends(get_db)):
         .options(joinedload(Invoice.supplier), joinedload(Invoice.items).joinedload(InvoiceItem.product))
         .order_by(Invoice.date.desc())
         .limit(5)
-        .unique()
         .all()
     )
+    seen_ids: set[int] = set()
+    unique_invoices = []
+    for inv in recent_invoices:
+        if inv.id not in seen_ids:
+            seen_ids.add(inv.id)
+            unique_invoices.append(inv)
+    recent_invoices = unique_invoices
 
     top_suppliers_q = (
         db.query(

@@ -27,7 +27,14 @@ def list_delivery_notes(
         query = query.filter(DeliveryNote.date >= date_from)
     if date_to:
         query = query.filter(DeliveryNote.date <= date_to)
-    return query.order_by(DeliveryNote.date.desc()).offset(skip).limit(limit).unique().all()
+    results = query.order_by(DeliveryNote.date.desc()).offset(skip).limit(limit).all()
+    seen: set[int] = set()
+    unique = []
+    for dn in results:
+        if dn.id not in seen:
+            seen.add(dn.id)
+            unique.append(dn)
+    return unique
 
 
 @router.post("/", response_model=DeliveryNoteOut, status_code=201)
