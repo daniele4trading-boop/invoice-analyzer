@@ -1,222 +1,273 @@
-import { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Cloud, FolderInput, CheckCircle, AlertCircle, Loader, Link2, Unlink } from 'lucide-react';
+import { useState, useRef, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { FolderInput, CheckCircle, AlertCircle, Loader, Upload, X } from 'lucide-react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
-interface ImportResult {
-  total_files: number;
-  imported: number;
-  skipped_duplicate: number;
-  errors: string[];
-  imported_invoices: { id: number; number: string; file_name: string; supplier: string | null; total_amount: number }[];
-}
-
-interface OneDriveStatus {
-  connected: boolean;
-  oauth_configured: boolean;
-  folder_path: string;
-  archive_subfolder: string;
+interface ImportedInvoice {
+  file_name: string;
+  number: string | null;
+  supplier: string | null;
+  total_amount: number | null;
+  status: 'imported' | 'error' | 'pending' | 'processing';
+  error?: string;
+  invoice_id?: number;
 }
 
 const fmt = (n: number) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n);
 
-export default function OneDriveImport() {
+export default function BulkImport() {
   const qc = useQueryClient();
-  const [result, setResult] = useState<ImportResult | null>(null);
-  const [connectMsg, setConnectMsg] = useState<string | null>(null);
+  const { user, businesses } = useAuth();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [results, setResults] = useState<ImportedInvoice[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
+  const [businessId, setBusinessId] = useState<string>(user?.business_id ? String(user.business_id) : '');
 
-  const params = new URLSearchParams(window.location.search);
-  useEffect(() => {
-    if (params.get('connected') === 'true') {
-      setConnectMsg('OneDrive collegato con successo!');
-      window.history.replaceState({}, '', '/onedrive-import');
-      qc.invalidateQueries({ queryKey: ['onedrive-status'] });
-    } else if (params.get('error')) {
-      setConnectMsg(`Errore connessione: ${params.get('error')}`);
-      window.history.replaceState({}, '', '/onedrive-import');
-    }
+  const isMaster = user?.role === 'master';
+
+  const handleFiles = useCallback((files: FileList | File[]) => {
+    const fileArray = Array.from(files).filter((f) => {
+      const ext = f.name.split('.').pop()?.toLowerCase() || '';
+      return ['pdf', 'jpg', 'jpeg', 'png', 'tiff', 'bmp', 'webp'].includes(ext);
+    });
+    setSelectedFiles((prev) => [...prev, ...fileArray]);
   }, []);
 
-  const { data: status } = useQuery<OneDriveStatus>({
-    queryKey: ['onedrive-status'],
-    queryFn: () => api.get('/api/onedrive/status'),
-  });
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    handleFiles(e.dataTransfer.files);
+  }, [handleFiles]);
 
-  const importMut = useMutation({
-    mutationFn: () => api.post<ImportResult>('/api/onedrive/import', {}),
-    onSuccess: (data) => {
-      setResult(data);
-      qc.invalidateQueries({ queryKey: ['invoices'] });
-      qc.invalidateQueries({ queryKey: ['dashboard'] });
-    },
-  });
-
-  const disconnectMut = useMutation({
-    mutationFn: () => api.post('/api/onedrive/disconnect', {}),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['onedrive-status'] });
-      setResult(null);
-      setConnectMsg(null);
-    },
-  });
-
-  const handleConnect = () => {
-    window.location.href = '/api/onedrive/auth';
+  const removeFile = (idx: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== idx));
   };
+
+  const processFiles = async () => {
+    if (selectedFiles.length === 0) return;
+    setIsImporting(true);
+    const initialResults: ImportedInvoice[] = selectedFiles.map((f) => ({
+      file_name: f.name,
+      number: null,
+      supplier: null,
+      total_amount: null,
+      status: 'pending',
+    }));
+    setResults(initialResults);
+
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const file = selectedFiles[i];
+      setResults((prev) => prev.map((r, idx) => idx === i ? { ...r, status: 'processing' } : r));
+
+      try {
+        const parsed = await api.upload<{
+          file_path: string;
+          parsed_data: {
+            number: string | null;
+            date: string | null;
+            total_amount: number | null;
+            vat_amount: number | null;
+            net_amount: number | null;
+            supplier: { id: number; name: string } | null;
+            items: { description: string; quantity: number; unit_price: number; total_price: number }[];
+          };
+        }>('/api/upload/parse', file);
+
+        const p = parsed.parsed_data;
+        const invoiceData = {
+          number: p.number || file.name,
+          date: p.date || new Date().toISOString().split('T')[0],
+          supplier_id: p.supplier?.id || null,
+          business_id: businessId ? parseInt(businessId) : (user?.business_id || null),
+          total_amount: p.total_amount || 0,
+          vat_amount: p.vat_amount || 0,
+          net_amount: p.net_amount || (p.total_amount || 0) - (p.vat_amount || 0),
+          file_path: parsed.file_path,
+          items: p.items.map((it) => ({
+            product_id: null,
+            description: it.description,
+            quantity: it.quantity,
+            unit_price: it.unit_price,
+            total_price: it.total_price,
+          })),
+        };
+
+        if (invoiceData.supplier_id) {
+          const inv = await api.post<{ id: number }>('/api/invoices/', invoiceData);
+          setResults((prev) => prev.map((r, idx) => idx === i ? {
+            ...r,
+            status: 'imported',
+            number: p.number,
+            supplier: p.supplier?.name || null,
+            total_amount: p.total_amount,
+            invoice_id: inv.id,
+          } : r));
+        } else {
+          setResults((prev) => prev.map((r, idx) => idx === i ? {
+            ...r,
+            status: 'error',
+            number: p.number,
+            total_amount: p.total_amount,
+            error: 'Fornitore non riconosciuto - carica manualmente dalla pagina "Carica Fattura"',
+          } : r));
+        }
+      } catch (err) {
+        setResults((prev) => prev.map((r, idx) => idx === i ? {
+          ...r,
+          status: 'error',
+          error: err instanceof Error ? err.message : 'Errore sconosciuto',
+        } : r));
+      }
+    }
+
+    setIsImporting(false);
+    setSelectedFiles([]);
+    qc.invalidateQueries({ queryKey: ['invoices'] });
+    qc.invalidateQueries({ queryKey: ['dashboard'] });
+  };
+
+  const importedCount = results.filter((r) => r.status === 'imported').length;
+  const errorCount = results.filter((r) => r.status === 'error').length;
 
   return (
     <div>
       <div className="page-header">
-        <h2><Cloud size={22} /> Importa da OneDrive</h2>
+        <h2><FolderInput size={22} /> Importazione Multipla</h2>
       </div>
 
-      {connectMsg && (
-        <div className="card" style={{
-          padding: '1rem 1.5rem',
-          marginBottom: '1rem',
-          borderColor: connectMsg.includes('successo') ? '#86efac' : '#fca5a5',
-          backgroundColor: connectMsg.includes('successo') ? '#f0fdf4' : '#fef2f2',
-        }}>
-          <p style={{
-            color: connectMsg.includes('successo') ? '#16a34a' : '#dc2626',
-            display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0,
-          }}>
-            {connectMsg.includes('successo')
-              ? <CheckCircle size={18} />
-              : <AlertCircle size={18} />
-            }
-            {connectMsg}
-          </p>
-        </div>
-      )}
-
       <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-        <h3 style={{ marginBottom: '1rem' }}>Connessione OneDrive</h3>
+        <h3 style={{ marginBottom: '1rem' }}>Carica più fatture contemporaneamente</h3>
+        <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
+          Seleziona o trascina più file (PDF, JPG, PNG) per importarli tutti insieme.
+          Ogni file verrà analizzato con OCR e salvato automaticamente. I file senza fornitore riconosciuto
+          dovranno essere caricati manualmente.
+        </p>
 
-        {!status?.oauth_configured ? (
-          <div style={{ color: '#d97706', padding: '1rem', background: '#fffbeb', borderRadius: '0.5rem' }}>
-            <p style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0 0 0.5rem 0' }}>
-              <AlertCircle size={16} /> <strong>Configurazione richiesta</strong>
-            </p>
-            <p style={{ margin: '0', fontSize: '0.9rem' }}>
-              Per utilizzare l'importazione da OneDrive, è necessario configurare un'app Microsoft Azure.
-              Imposta le variabili <code>MS_CLIENT_ID</code> e <code>MS_CLIENT_SECRET</code> nel file .env del backend.
-            </p>
+        {isMaster && businesses.length > 0 && (
+          <div className="form-group" style={{ marginBottom: '1rem', maxWidth: '300px' }}>
+            <label>Assegna al negozio</label>
+            <select className="form-control" value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
+              <option value="">— Nessuno —</option>
+              {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
           </div>
-        ) : status?.connected ? (
-          <>
-            <p style={{ color: '#16a34a', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <CheckCircle size={16} /> OneDrive collegato
-            </p>
-            <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
-              Cartella: <strong>{status.folder_path}</strong> — I file importati verranno spostati nella
-              sottocartella <strong>"{status.archive_subfolder}"</strong>. Le fatture duplicate vengono automaticamente saltate.
-            </p>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <button
-                className="btn btn-primary"
-                onClick={() => importMut.mutate()}
-                disabled={importMut.isPending}
-                style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
-              >
-                {importMut.isPending
-                  ? <><Loader size={18} className="spin" /> Importazione in corso...</>
-                  : <><FolderInput size={18} /> Importa Fatture da OneDrive</>
-                }
-              </button>
-              <button
-                className="btn"
-                onClick={() => disconnectMut.mutate()}
-                disabled={disconnectMut.isPending}
-                style={{ fontSize: '0.9rem', padding: '0.5rem 1rem', background: '#fee2e2', color: '#dc2626', border: '1px solid #fca5a5' }}
-              >
-                <Unlink size={16} /> Scollega OneDrive
-              </button>
+        )}
+
+        {!isImporting && (
+          <div
+            className={`card upload-zone ${dragOver ? 'drag-over' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onDrop}
+            onClick={() => fileRef.current?.click()}
+            style={{ cursor: 'pointer', marginBottom: '1rem' }}
+          >
+            <div style={{ textAlign: 'center', padding: '2rem 1.5rem' }}>
+              <Upload size={40} style={{ color: 'var(--primary)', marginBottom: '0.75rem' }} />
+              <p style={{ margin: '0 0 0.25rem', fontWeight: 600 }}>Trascina qui i file o clicca per selezionare</p>
+              <p className="text-muted" style={{ margin: 0, fontSize: '0.85rem' }}>PDF, JPG, PNG, TIFF, BMP — puoi selezionare più file</p>
             </div>
-          </>
-        ) : (
+          </div>
+        )}
+
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pdf,.jpg,.jpeg,.png,.tiff,.bmp,.webp"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            if (e.target.files) handleFiles(e.target.files);
+            e.target.value = '';
+          }}
+        />
+
+        {selectedFiles.length > 0 && !isImporting && (
           <>
-            <p style={{ color: '#666', marginBottom: '1rem', fontSize: '0.9rem' }}>
-              Collega il tuo account OneDrive per importare le fatture direttamente dalla cartella condivisa.
-              L'autorizzazione richiede il tuo account Microsoft.
-            </p>
-            <button
-              className="btn btn-primary"
-              onClick={handleConnect}
-              style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}
-            >
-              <Link2 size={18} /> Collega OneDrive
+            <h4 style={{ marginBottom: '0.5rem' }}>File selezionati ({selectedFiles.length})</h4>
+            <div style={{ marginBottom: '1rem' }}>
+              {selectedFiles.map((f, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.25rem 0' }}>
+                  <span style={{ flex: 1, fontSize: '0.9rem' }}>{f.name}</span>
+                  <span className="text-muted" style={{ fontSize: '0.8rem' }}>{(f.size / 1024).toFixed(0)} KB</span>
+                  <button className="btn btn-danger btn-sm" onClick={() => removeFile(i)} style={{ padding: '0.15rem 0.4rem' }}>
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button className="btn btn-primary" onClick={processFiles} style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}>
+              <FolderInput size={18} /> Importa {selectedFiles.length} {selectedFiles.length === 1 ? 'file' : 'file'}
             </button>
           </>
         )}
+
+        {isImporting && (
+          <div style={{ marginTop: '1rem' }}>
+            <p style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--primary)' }}>
+              <Loader size={18} className="spin" /> Importazione in corso...
+            </p>
+          </div>
+        )}
       </div>
 
-      {importMut.isError && (
-        <div className="card" style={{ padding: '1.5rem', borderColor: '#fca5a5' }}>
-          <p style={{ color: '#dc2626', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <AlertCircle size={18} /> Errore: {importMut.error instanceof Error ? importMut.error.message : 'Errore sconosciuto'}
-          </p>
-        </div>
-      )}
-
-      {result && (
+      {results.length > 0 && (
         <div className="card" style={{ padding: '1.5rem' }}>
           <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <CheckCircle size={20} color="#16a34a" /> Risultato Importazione
+            {!isImporting && <CheckCircle size={20} color="#16a34a" />} Risultato Importazione
           </h3>
-          <div className="stats-grid" style={{ marginBottom: '1rem' }}>
-            <div className="stat-card">
-              <div className="stat-label">File trovati</div>
-              <div className="stat-value">{result.total_files}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Importati</div>
-              <div className="stat-value" style={{ color: '#16a34a' }}>{result.imported}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Duplicati saltati</div>
-              <div className="stat-value" style={{ color: '#d97706' }}>{result.skipped_duplicate}</div>
-            </div>
-          </div>
 
-          {result.imported_invoices.length > 0 && (
-            <>
-              <h4 style={{ marginBottom: '0.5rem' }}>Fatture importate</h4>
-              <table>
-                <thead>
-                  <tr>
-                    <th>File</th>
-                    <th>Numero</th>
-                    <th>Fornitore</th>
-                    <th className="text-right">Totale</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.imported_invoices.map((inv) => (
-                    <tr key={inv.id}>
-                      <td>{inv.file_name}</td>
-                      <td>{inv.number}</td>
-                      <td>{inv.supplier || '—'}</td>
-                      <td className="text-right font-mono">{fmt(inv.total_amount)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
+          {!isImporting && (
+            <div className="stats-grid" style={{ marginBottom: '1rem' }}>
+              <div className="stat-card">
+                <div className="stat-label">File totali</div>
+                <div className="stat-value">{results.length}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Importati</div>
+                <div className="stat-value" style={{ color: '#16a34a' }}>{importedCount}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Errori</div>
+                <div className="stat-value" style={{ color: errorCount > 0 ? '#dc2626' : '#666' }}>{errorCount}</div>
+              </div>
+            </div>
           )}
 
-          {result.total_files === 0 && (
-            <p style={{ color: '#666' }}>Nessun file trovato nella cartella OneDrive.</p>
-          )}
-
-          {result.errors.length > 0 && (
-            <div style={{ marginTop: '1rem' }}>
-              <h4 style={{ color: '#dc2626' }}>Errori</h4>
-              <ul style={{ fontSize: '0.85rem', color: '#dc2626' }}>
-                {result.errors.map((err, i) => <li key={i}>{err}</li>)}
-              </ul>
-            </div>
-          )}
+          <table>
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Stato</th>
+                <th>Numero</th>
+                <th>Fornitore</th>
+                <th className="text-right">Totale</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((r, i) => (
+                <tr key={i}>
+                  <td style={{ fontSize: '0.9rem' }}>{r.file_name}</td>
+                  <td>
+                    {r.status === 'imported' && <span style={{ color: '#16a34a' }}><CheckCircle size={14} /> Importato</span>}
+                    {r.status === 'error' && (
+                      <span style={{ color: '#dc2626', fontSize: '0.85rem' }}>
+                        <AlertCircle size={14} /> {r.error}
+                      </span>
+                    )}
+                    {r.status === 'processing' && <span style={{ color: 'var(--primary)' }}><Loader size={14} className="spin" /> Analisi...</span>}
+                    {r.status === 'pending' && <span className="text-muted">In attesa</span>}
+                  </td>
+                  <td>{r.number || '—'}</td>
+                  <td>{r.supplier || '—'}</td>
+                  <td className="text-right font-mono">{r.total_amount != null ? fmt(r.total_amount) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

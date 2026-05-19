@@ -2,6 +2,7 @@ import { useState, useRef, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Upload, FileText, Camera, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { UploadResult, Supplier, Product } from '../types';
 
 const confBadge = (level: string) => {
@@ -24,6 +25,8 @@ interface ItemForm {
 
 export default function UploadInvoice() {
   const queryClient = useQueryClient();
+  const { user, businesses } = useAuth();
+  const isMaster = user?.role === 'master';
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
@@ -35,6 +38,7 @@ export default function UploadInvoice() {
   const [totalAmount, setTotalAmount] = useState('');
   const [vatAmount, setVatAmount] = useState('');
   const [notes, setNotes] = useState('');
+  const [businessId, setBusinessId] = useState(user?.business_id ? String(user.business_id) : '');
   const [items, setItems] = useState<ItemForm[]>([]);
 
   const { data: suppliers = [] } = useQuery<Supplier[]>({
@@ -78,6 +82,7 @@ export default function UploadInvoice() {
         number,
         date,
         supplier_id: parseInt(supplierId),
+        business_id: businessId ? parseInt(businessId) : null,
         total_amount: total,
         vat_amount: parseFloat(vatAmount) || 0,
         net_amount: total - (parseFloat(vatAmount) || 0),
@@ -277,6 +282,18 @@ export default function UploadInvoice() {
                         <option key={s.id} value={s.id}>
                           {s.name}
                         </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid-2" style={{ marginBottom: '0.5rem' }}>
+                  <div className="form-group">
+                    <label>Negozio</label>
+                    <select className="form-control" value={businessId} onChange={(e) => setBusinessId(e.target.value)} disabled={!isMaster}>
+                      <option value="">— Nessuno —</option>
+                      {businesses.map((b) => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
                       ))}
                     </select>
                   </div>

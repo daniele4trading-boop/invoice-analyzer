@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Eye, X, Edit, AlertTriangle } from 'lucide-react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { Invoice, Supplier, Product } from '../types';
 
 const fmt = (n: number) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n);
@@ -15,6 +16,8 @@ interface ItemForm {
 
 export default function Invoices() {
   const qc = useQueryClient();
+  const { user, businesses } = useAuth();
+  const isMaster = user?.role === 'master';
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showDetail, setShowDetail] = useState<Invoice | null>(null);
@@ -24,7 +27,7 @@ export default function Invoices() {
   const [duplicateWarning, setDuplicateWarning] = useState('');
   const [form, setForm] = useState({
     number: '', date: '', supplier_id: '', notes: '',
-    vat_amount: '', net_amount: '',
+    vat_amount: '', net_amount: '', business_id: '',
   });
   const [items, setItems] = useState<ItemForm[]>([]);
 
@@ -71,7 +74,7 @@ export default function Invoices() {
   }
 
   function openNew() {
-    setForm({ number: '', date: '', supplier_id: '', notes: '', vat_amount: '', net_amount: '' });
+    setForm({ number: '', date: '', supplier_id: '', notes: '', vat_amount: '', net_amount: '', business_id: user?.business_id ? String(user.business_id) : '' });
     setItems([]);
     setEditingId(null);
     setDuplicateWarning('');
@@ -86,6 +89,7 @@ export default function Invoices() {
       notes: inv.notes || '',
       vat_amount: inv.vat_amount ? String(inv.vat_amount) : '',
       net_amount: inv.net_amount ? String(inv.net_amount) : '',
+      business_id: inv.business_id ? String(inv.business_id) : '',
     });
     setItems(inv.items.map((it) => ({
       product_id: it.product_id ? String(it.product_id) : '',
@@ -147,6 +151,7 @@ export default function Invoices() {
       number: form.number,
       date: form.date,
       supplier_id: Number(form.supplier_id),
+      business_id: form.business_id ? Number(form.business_id) : null,
       total_amount: calcTotal(),
       vat_amount: parseFloat(form.vat_amount) || 0,
       net_amount: parseFloat(form.net_amount) || calcTotal(),
@@ -195,6 +200,7 @@ export default function Invoices() {
                 <th>Numero</th>
                 <th>Data</th>
                 <th>Fornitore</th>
+                <th>Negozio</th>
                 <th>Righe</th>
                 <th className="text-right">Totale</th>
                 <th></th>
@@ -202,13 +208,14 @@ export default function Invoices() {
             </thead>
             <tbody>
               {invoices.length === 0 ? (
-                <tr><td colSpan={6} className="text-center text-muted">Nessuna fattura</td></tr>
+                <tr><td colSpan={7} className="text-center text-muted">Nessuna fattura</td></tr>
               ) : (
                 invoices.map((inv) => (
                   <tr key={inv.id}>
                     <td><strong>{inv.number}</strong></td>
                     <td>{new Date(inv.date).toLocaleDateString('it-IT')}</td>
                     <td>{inv.supplier?.name}</td>
+                    <td>{inv.business?.name || '—'}</td>
                     <td>{inv.items.length}</td>
                     <td className="text-right font-mono">{fmt(inv.total_amount)}</td>
                     <td>
@@ -236,6 +243,7 @@ export default function Invoices() {
             <div className="modal-body">
               <p><strong>Fornitore:</strong> {showDetail.supplier?.name}</p>
               <p><strong>Data:</strong> {new Date(showDetail.date).toLocaleDateString('it-IT')}</p>
+              <p><strong>Negozio:</strong> {showDetail.business?.name || '—'}</p>
               <p><strong>Totale:</strong> {fmt(showDetail.total_amount)}</p>
               {showDetail.notes && <p><strong>Note:</strong> {showDetail.notes}</p>}
               <table style={{ marginTop: '1rem' }}>
@@ -298,7 +306,16 @@ export default function Invoices() {
                     </select>
                   </div>
                 </div>
-                <div className="grid-2">
+                <div className="grid-3">
+                  <div className="form-group">
+                    <label>Negozio</label>
+                    <select className="form-control" value={form.business_id}
+                      onChange={(e) => setForm({ ...form, business_id: e.target.value })}
+                      disabled={!isMaster}>
+                      <option value="">— Nessuno —</option>
+                      {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                  </div>
                   <div className="form-group">
                     <label>IVA</label>
                     <input type="number" step="0.01" className="form-control" value={form.vat_amount} onChange={(e) => setForm({ ...form, vat_amount: e.target.value })} />
