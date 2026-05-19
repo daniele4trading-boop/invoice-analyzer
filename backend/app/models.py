@@ -77,6 +77,7 @@ class Supplier(Base):
     invoices = relationship("Invoice", back_populates="supplier")
     delivery_notes = relationship("DeliveryNote", back_populates="supplier")
     price_quotes = relationship("PriceQuote", back_populates="supplier")
+    invoice_template = relationship("SupplierInvoiceTemplate", back_populates="supplier", uselist=False)
 
 
 class ProductCategory(Base):
@@ -103,6 +104,7 @@ class Product(Base):
     invoice_items = relationship("InvoiceItem", back_populates="product")
     delivery_note_items = relationship("DeliveryNoteItem", back_populates="product")
     price_quotes = relationship("PriceQuote", back_populates="product")
+    aliases = relationship("ProductAlias", back_populates="product", cascade="all, delete-orphan")
 
 
 class Invoice(Base):
@@ -189,6 +191,30 @@ class PriceQuote(Base):
     supplier = relationship("Supplier", back_populates="price_quotes")
     product = relationship("Product", back_populates="price_quotes")
     business = relationship("Business", back_populates="price_quotes")
+
+
+class ProductAlias(Base):
+    __tablename__ = "product_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    alias = Column(String(255), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    product = relationship("Product", back_populates="aliases")
+
+
+class SupplierInvoiceTemplate(Base):
+    __tablename__ = "supplier_invoice_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, unique=True)
+    template_config = Column(Text, nullable=True)
+    sample_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    supplier = relationship("Supplier", back_populates="invoice_template")
 
 
 class AppSetting(Base):

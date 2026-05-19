@@ -1,14 +1,51 @@
 import { useState, useRef, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Upload, FileText, Camera, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { Upload, FileText, Camera, CheckCircle, AlertCircle, Loader, UserPlus, Link2 } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import type { UploadResult, Supplier, Product } from '../types';
+import type { Supplier, Product } from '../types';
+
+interface ParsedResult {
+  file_path: string;
+  file_name: string;
+  extracted_text: string;
+  parsed_data: {
+    number: string | null;
+    date: string | null;
+    total_amount: number | null;
+    vat_amount: number | null;
+    net_amount: number | null;
+    supplier_vat_number: string | null;
+    supplier: {
+      id: number | null;
+      name: string | null;
+      matched_by: string;
+      confidence: string;
+      score?: number;
+      extracted_name?: string;
+      extracted_vat?: string | null;
+    } | null;
+    items: {
+      description: string;
+      quantity: number;
+      unit_price: number;
+      total_price: number;
+      product_match?: {
+        product_id: number;
+        product_name: string;
+        confidence: string;
+        score: number;
+      } | null;
+    }[];
+  };
+  confidence: Record<string, string>;
+}
 
 const confBadge = (level: string) => {
   const map: Record<string, { cls: string; label: string }> = {
     high: { cls: 'badge-green', label: 'Alta' },
     medium: { cls: 'badge-orange', label: 'Media' },
+    low: { cls: 'badge-red', label: 'Bassa' },
     none: { cls: 'badge-red', label: 'Non trovato' },
   };
   const cfg = map[level] || map.none;
@@ -21,6 +58,8 @@ interface ItemForm {
   quantity: string;
   unit_price: string;
   total_price: string;
+  match_confidence?: string;
+  match_name?: string;
 }
 
 export default function UploadInvoice() {
@@ -29,7 +68,7 @@ export default function UploadInvoice() {
   const isMaster = user?.role === 'master';
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [result, setResult] = useState<UploadResult | null>(null);
+  const [result, setResult] = useState<ParsedResult | null>(null);
   const [saved, setSaved] = useState(false);
 
   const [number, setNumber] = useState('');
@@ -41,7 +80,13 @@ export default function UploadInvoice() {
   const [businessId, setBusinessId] = useState(user?.business_id ? String(user.business_id) : '');
   const [items, setItems] = useState<ItemForm[]>([]);
 
-  const { data: suppliers = [] } = useQuery<Supplier[]>({
+  // Supplier creation state
+  const [showNewSupplier, setShowNewSupplier] = useState(false);
+  const [newSupplierName, setNewSupplierName] = useState('');
+  const [newSupplierVat, setNewSupplierVat] = useState('');
+  const [supplierMatchInfo, setSupplierMatchInfo] = useState<string>('');
+
+  const { data: suppliers = [], refetch: refetchSuppliers } = useQuery<Supplier[]>({
     queryKey: ['suppliers'],
     queryFn: () => api.get('/api/suppliers/'),
   });
@@ -52,32 +97,82 @@ export default function UploadInvoice() {
   });
 
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.upload<UploadResult>('/api/upload/parse', file),
+    mutationFn: (file: File) => api.upload<ParsedResult>('/api/upload/parse', file),
     onSuccess: (data) => {
       setResult(data);
       setSaved(false);
       const p = data.parsed_data;
       setNumber(p.number || '');
       setDate(p.date || '');
-      setSupplierId(p.supplier ? String(p.supplier.id) : '');
-      setTotalAmount(p.total_amount != null ? String(p.total_amount) : '');
       setVatAmount(p.vat_amount != null ? String(p.vat_amount) : '');
+      setTotalAmount(p.total_amount != null ? String(p.total_amount) : '');
       setNotes('');
+
+      // Handle supplier matching
+      if (p.supplier && p.supplier.id) {
+        setSupplierId(String(p.supplier.id));
+        setShowNewSupplier(false);
+        if (p.supplier.matched_by === 'fuzzy') {
+          setSupplierMatchInfo(
+            `Fornitore "${p.supplier.extracted_name}" associato a "${p.supplier.name}" (similitudine: ${Math.round((p.supplier.score || 0) * 100)}%)`
+          );
+        } else {
+          setSupplierMatchInfo('');
+        }
+      } else if (p.supplier && p.supplier.matched_by === 'not_found') {
+        setSupplierId('');
+        setShowNewSupplier(true);
+        setNewSupplierName(p.supplier.extracted_name || '');
+        setNewSupplierVat(p.supplier.extracted_vat || p.supplier_vat_number || '');
+        setSupplierMatchInfo('');
+      } else {
+        setSupplierId('');
+        setShowNewSupplier(false);
+        setSupplierMatchInfo('');
+      }
+
+      // Map items with product match info
       setItems(
         p.items.map((it) => ({
-          product_id: '',
+          product_id: it.product_match?.product_id ? String(it.product_match.product_id) : '',
           description: it.description,
           quantity: String(it.quantity),
           unit_price: String(it.unit_price),
           total_price: String(it.total_price),
+          match_confidence: it.product_match?.confidence,
+          match_name: it.product_match?.product_name,
         })),
       );
     },
   });
 
+  const createSupplierMut = useMutation({
+    mutationFn: (data: { name: string; vat_number?: string }) =>
+      api.post<{ id: number; name: string; created: boolean }>('/api/upload/create-supplier', data),
+    onSuccess: (data) => {
+      setSupplierId(String(data.id));
+      setShowNewSupplier(false);
+      setSupplierMatchInfo(data.created ? `Fornitore "${data.name}" creato` : `Fornitore "${data.name}" già esistente`);
+      refetchSuppliers();
+    },
+  });
+
+  const saveAliasMut = useMutation({
+    mutationFn: (data: { product_id: number; alias: string }) =>
+      api.post('/api/upload/save-product-alias', data),
+  });
+
   const saveMutation = useMutation({
     mutationFn: async () => {
       const total = parseFloat(totalAmount) || 0;
+
+      // Save aliases for fuzzy-matched products
+      for (const item of items) {
+        if (item.product_id && item.description && item.match_confidence && item.match_confidence !== 'high') {
+          saveAliasMut.mutate({ product_id: parseInt(item.product_id), alias: item.description });
+        }
+      }
+
       const body = {
         number,
         date,
@@ -125,7 +220,15 @@ export default function UploadInvoice() {
   );
 
   const updateItem = (idx: number, field: keyof ItemForm, value: string) => {
-    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: value } : it)));
+    setItems((prev) => prev.map((it, i) => {
+      if (i !== idx) return it;
+      const updated = { ...it, [field]: value };
+      if (field === 'product_id') {
+        updated.match_confidence = undefined;
+        updated.match_name = undefined;
+      }
+      return updated;
+    }));
   };
 
   const addItem = () => {
@@ -239,6 +342,8 @@ export default function UploadInvoice() {
                 onClick={() => {
                   setResult(null);
                   uploadMutation.reset();
+                  setShowNewSupplier(false);
+                  setSupplierMatchInfo('');
                 }}
               >
                 Carica altro file
@@ -258,6 +363,46 @@ export default function UploadInvoice() {
                   </span>
                 ))}
               </div>
+
+              {/* Supplier match info */}
+              {supplierMatchInfo && (
+                <div className="alert alert-warning" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', padding: '0.75rem', borderRadius: '6px', background: '#fef3c7', border: '1px solid #fbbf24' }}>
+                  <Link2 size={16} /> {supplierMatchInfo}
+                </div>
+              )}
+
+              {/* New supplier creation panel */}
+              {showNewSupplier && (
+                <div className="card" style={{ marginBottom: '1rem', border: '2px solid var(--warning)', background: '#fffbeb' }}>
+                  <div className="card-body" style={{ padding: '1rem' }}>
+                    <h4 style={{ marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <UserPlus size={18} /> Fornitore non trovato — Vuoi crearlo?
+                    </h4>
+                    <div className="grid-2">
+                      <div className="form-group">
+                        <label>Nome Fornitore</label>
+                        <input className="form-control" value={newSupplierName} onChange={(e) => setNewSupplierName(e.target.value)} />
+                      </div>
+                      <div className="form-group">
+                        <label>P.IVA</label>
+                        <input className="form-control" value={newSupplierVat} onChange={(e) => setNewSupplierVat(e.target.value)} />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => createSupplierMut.mutate({ name: newSupplierName, vat_number: newSupplierVat || undefined })}
+                        disabled={!newSupplierName.trim() || createSupplierMut.isPending}
+                      >
+                        {createSupplierMut.isPending ? 'Creazione...' : 'Crea Fornitore'}
+                      </button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => setShowNewSupplier(false)}>
+                        Annulla (seleziona manualmente)
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <form
                 onSubmit={(e) => {
@@ -341,7 +486,8 @@ export default function UploadInvoice() {
                       <thead>
                         <tr>
                           <th>Prodotto</th>
-                          <th>Descrizione</th>
+                          <th>Descrizione OCR</th>
+                          <th>Corrisp.</th>
                           <th>Quantità</th>
                           <th>Prezzo Unit.</th>
                           <th>Totale</th>
@@ -350,7 +496,7 @@ export default function UploadInvoice() {
                       </thead>
                       <tbody>
                         {items.map((item, idx) => (
-                          <tr key={idx}>
+                          <tr key={idx} style={item.match_confidence === 'low' ? { background: '#fef3c7' } : item.match_confidence === 'medium' ? { background: '#fff7ed' } : {}}>
                             <td>
                               <select
                                 className="form-control"
@@ -373,6 +519,15 @@ export default function UploadInvoice() {
                                 onChange={(e) => updateItem(idx, 'description', e.target.value)}
                                 style={{ minWidth: 150 }}
                               />
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {item.match_confidence ? (
+                                <span title={item.match_name ? `Associato a: ${item.match_name}` : ''}>
+                                  {confBadge(item.match_confidence)}
+                                </span>
+                              ) : (
+                                <span className="text-muted" style={{ fontSize: '0.8rem' }}>—</span>
+                              )}
                             </td>
                             <td>
                               <input
@@ -453,6 +608,8 @@ export default function UploadInvoice() {
                   setResult(null);
                   setSaved(false);
                   uploadMutation.reset();
+                  setShowNewSupplier(false);
+                  setSupplierMatchInfo('');
                 }}
               >
                 Carica altra fattura

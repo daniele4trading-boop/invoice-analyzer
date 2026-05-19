@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
 from datetime import date, datetime
+from difflib import SequenceMatcher
 
 import pdfplumber
 import pytesseract
@@ -12,7 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Supplier, User
+from app.models import Product, ProductAlias, Supplier, SupplierInvoiceTemplate, User
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -160,18 +162,127 @@ def _find_line_items(text: str) -> list[dict]:
     return items
 
 
+def _normalize(s: str) -> str:
+    """Normalize a string for fuzzy comparison."""
+    s = s.lower().strip()
+    s = re.sub(r'[^a-z0-9àèéìòù\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+
+
 def _match_supplier(vat_number: str | None, text: str, db: Session) -> dict | None:
     if vat_number:
         supplier = db.query(Supplier).filter(Supplier.vat_number == vat_number).first()
         if supplier:
-            return {"id": supplier.id, "name": supplier.name, "matched_by": "vat_number"}
+            return {"id": supplier.id, "name": supplier.name, "matched_by": "vat_number", "confidence": "high"}
 
     suppliers = db.query(Supplier).all()
     text_lower = text.lower()
+
+    # Exact name match
     for s in suppliers:
         if s.name and s.name.lower() in text_lower:
-            return {"id": s.id, "name": s.name, "matched_by": "name"}
+            return {"id": s.id, "name": s.name, "matched_by": "name", "confidence": "high"}
+
+    # Fuzzy name match against extracted supplier name from text
+    supplier_name = _extract_supplier_name(text)
+    if supplier_name:
+        best_match = None
+        best_score = 0.0
+        for s in suppliers:
+            score = _similarity(supplier_name, s.name)
+            if score > best_score:
+                best_score = score
+                best_match = s
+        if best_match and best_score >= 0.75:
+            return {
+                "id": best_match.id, "name": best_match.name,
+                "matched_by": "fuzzy", "confidence": "high" if best_score >= 0.9 else "medium",
+                "score": round(best_score, 2),
+                "extracted_name": supplier_name,
+            }
+        if supplier_name:
+            return {
+                "id": None, "name": None,
+                "matched_by": "not_found", "confidence": "none",
+                "extracted_name": supplier_name,
+                "extracted_vat": vat_number,
+            }
+
     return None
+
+
+def _extract_supplier_name(text: str) -> str | None:
+    """Try to extract the supplier/company name from invoice text."""
+    patterns = [
+        re.compile(r"(?:ragione\s*sociale|ditta|spett\.?le|da|from|emittente)\s*[:.]?\s*(.+?)\n", re.IGNORECASE),
+    ]
+    for p in patterns:
+        m = p.search(text)
+        if m:
+            name = m.group(1).strip()
+            if len(name) > 2:
+                return name
+    # Fallback: first non-empty line that looks like a company name
+    for line in text.split('\n')[:10]:
+        line = line.strip()
+        if len(line) > 5 and not re.match(r'^\d', line) and not re.match(r'(?:fattura|invoice|data|date|n\.?|nr)', line, re.IGNORECASE):
+            if any(kw in line.lower() for kw in ['s.r.l', 'srl', 's.p.a', 'spa', 's.a.s', 'sas', 's.n.c', 'snc', 'di ', 'soc.']):
+                return line
+    return None
+
+
+def _match_products(items: list[dict], db: Session) -> list[dict]:
+    """Match extracted item descriptions to existing products using fuzzy matching."""
+    products = db.query(Product).all()
+    aliases = db.query(ProductAlias).all()
+
+    # Build lookup: normalized alias -> product
+    alias_map: dict[str, Product] = {}
+    for a in aliases:
+        alias_map[_normalize(a.alias)] = next((p for p in products if p.id == a.product_id), None)  # type: ignore
+    for p in products:
+        alias_map[_normalize(p.name)] = p
+
+    for item in items:
+        desc = item.get('description', '') or ''
+        if not desc:
+            continue
+        desc_norm = _normalize(desc)
+
+        # Exact alias/name match
+        if desc_norm in alias_map and alias_map[desc_norm]:
+            prod = alias_map[desc_norm]
+            item['product_match'] = {
+                'product_id': prod.id, 'product_name': prod.name,
+                'confidence': 'high', 'score': 1.0,
+            }
+            continue
+
+        # Fuzzy match
+        best_prod = None
+        best_score = 0.0
+        for name_norm, prod in alias_map.items():
+            if prod is None:
+                continue
+            score = _similarity(desc, name_norm)
+            if score > best_score:
+                best_score = score
+                best_prod = prod
+
+        if best_prod and best_score >= 0.6:
+            confidence = 'high' if best_score >= 0.85 else ('medium' if best_score >= 0.7 else 'low')
+            item['product_match'] = {
+                'product_id': best_prod.id, 'product_name': best_prod.name,
+                'confidence': confidence, 'score': round(best_score, 2),
+            }
+        else:
+            item['product_match'] = None
+
+    return items
 
 
 @router.post("/parse")
@@ -213,10 +324,15 @@ async def upload_and_parse(
     vat_number = _find_vat_number(text)
     supplier_match = _match_supplier(vat_number, text, db)
     line_items = _find_line_items(text)
+    line_items = _match_products(line_items, db)
 
     net_amount = None
     if total_amount and vat_amount:
         net_amount = round(total_amount - vat_amount, 2)
+
+    supplier_confidence = "none"
+    if supplier_match:
+        supplier_confidence = supplier_match.get("confidence", "none")
 
     return {
         "file_path": saved_path,
@@ -236,6 +352,91 @@ async def upload_and_parse(
             "number": "high" if invoice_number else "none",
             "date": "high" if invoice_date else "none",
             "total_amount": "high" if total_amount else "none",
-            "supplier": "high" if supplier_match and supplier_match["matched_by"] == "vat_number" else ("medium" if supplier_match else "none"),
+            "supplier": supplier_confidence,
         },
     }
+
+
+@router.post("/create-supplier")
+async def create_supplier_from_upload(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a new supplier from data extracted during invoice upload."""
+    name = data.get("name", "").strip()
+    if not name:
+        raise HTTPException(400, "Nome fornitore obbligatorio")
+
+    existing = db.query(Supplier).filter(Supplier.name == name).first()
+    if existing:
+        return {"id": existing.id, "name": existing.name, "created": False}
+
+    supplier = Supplier(
+        name=name,
+        vat_number=data.get("vat_number"),
+        address=data.get("address"),
+    )
+    db.add(supplier)
+    db.commit()
+    db.refresh(supplier)
+    return {"id": supplier.id, "name": supplier.name, "created": True}
+
+
+@router.post("/save-product-alias")
+async def save_product_alias(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save a product alias for better future matching."""
+    product_id = data.get("product_id")
+    alias = (data.get("alias") or "").strip()
+    if not product_id or not alias:
+        raise HTTPException(400, "product_id e alias obbligatori")
+
+    existing = db.query(ProductAlias).filter(
+        ProductAlias.product_id == product_id,
+        ProductAlias.alias == alias,
+    ).first()
+    if existing:
+        return {"id": existing.id, "saved": False}
+
+    pa = ProductAlias(product_id=product_id, alias=alias)
+    db.add(pa)
+    db.commit()
+    db.refresh(pa)
+    return {"id": pa.id, "saved": True}
+
+
+@router.post("/save-template")
+async def save_invoice_template(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save/update a per-supplier invoice template for better OCR parsing."""
+    supplier_id = data.get("supplier_id")
+    if not supplier_id:
+        raise HTTPException(400, "supplier_id obbligatorio")
+
+    template = db.query(SupplierInvoiceTemplate).filter(
+        SupplierInvoiceTemplate.supplier_id == supplier_id
+    ).first()
+
+    config = json.dumps(data.get("config", {}))
+    sample = data.get("sample_text", "")
+
+    if template:
+        template.template_config = config
+        template.sample_text = sample
+    else:
+        template = SupplierInvoiceTemplate(
+            supplier_id=supplier_id,
+            template_config=config,
+            sample_text=sample,
+        )
+        db.add(template)
+
+    db.commit()
+    return {"saved": True}
