@@ -307,15 +307,16 @@ export default function Invoices() {
                   </div>
                 </div>
                 <div className="grid-3">
-                  <div className="form-group">
-                    <label>Negozio</label>
-                    <select className="form-control" value={form.business_id}
-                      onChange={(e) => setForm({ ...form, business_id: e.target.value })}
-                      disabled={!isMaster}>
-                      <option value="">— Nessuno —</option>
-                      {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                    </select>
-                  </div>
+                  {isMaster && businesses.length > 0 && (
+                    <div className="form-group">
+                      <label>Negozio</label>
+                      <select className="form-control" value={form.business_id}
+                        onChange={(e) => setForm({ ...form, business_id: e.target.value })}>
+                        <option value="">— Nessuno —</option>
+                        {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      </select>
+                    </div>
+                  )}
                   <div className="form-group">
                     <label>IVA</label>
                     <input type="number" step="0.01" className="form-control" value={form.vat_amount} onChange={(e) => setForm({ ...form, vat_amount: e.target.value })} />

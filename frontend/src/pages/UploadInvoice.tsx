@@ -287,17 +287,19 @@ export default function UploadInvoice() {
                   </div>
                 </div>
 
-                <div className="grid-2" style={{ marginBottom: '0.5rem' }}>
-                  <div className="form-group">
-                    <label>Negozio</label>
-                    <select className="form-control" value={businessId} onChange={(e) => setBusinessId(e.target.value)} disabled={!isMaster}>
-                      <option value="">— Nessuno —</option>
-                      {businesses.map((b) => (
-                        <option key={b.id} value={b.id}>{b.name}</option>
-                      ))}
-                    </select>
+                {isMaster && businesses.length > 0 && (
+                  <div className="grid-2" style={{ marginBottom: '0.5rem' }}>
+                    <div className="form-group">
+                      <label>Negozio</label>
+                      <select className="form-control" value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
+                        <option value="">— Nessuno —</option>
+                        {businesses.map((b) => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="grid-3">
                   <div className="form-group">
