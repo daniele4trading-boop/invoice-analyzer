@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Eye, X } from 'lucide-react';
+import { Plus, Trash2, Eye, X, Edit, AlertTriangle } from 'lucide-react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { Invoice, Supplier, Product } from '../types';
 
 const fmt = (n: number) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n);
@@ -15,14 +16,18 @@ interface ItemForm {
 
 export default function Invoices() {
   const qc = useQueryClient();
+  const { user, businesses } = useAuth();
+  const isMaster = user?.role === 'master';
   const [showModal, setShowModal] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [showDetail, setShowDetail] = useState<Invoice | null>(null);
   const [filterSupplier, setFilterSupplier] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [duplicateWarning, setDuplicateWarning] = useState('');
   const [form, setForm] = useState({
     number: '', date: '', supplier_id: '', notes: '',
-    vat_amount: '', net_amount: '',
+    vat_amount: '', net_amount: '', business_id: '',
   });
   const [items, setItems] = useState<ItemForm[]>([]);
 
@@ -49,13 +54,53 @@ export default function Invoices() {
 
   const createMut = useMutation({
     mutationFn: (data: Record<string, unknown>) => api.post('/api/invoices/', data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['invoices'] }); qc.invalidateQueries({ queryKey: ['dashboard'] }); setShowModal(false); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['invoices'] }); qc.invalidateQueries({ queryKey: ['dashboard'] }); closeModal(); },
+  });
+
+  const updateMut = useMutation({
+    mutationFn: ({ id, ...data }: Record<string, unknown>) => api.put(`/api/invoices/${id}`, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['invoices'] }); qc.invalidateQueries({ queryKey: ['dashboard'] }); closeModal(); },
   });
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.del(`/api/invoices/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['invoices'] }); qc.invalidateQueries({ queryKey: ['dashboard'] }); },
   });
+
+  function closeModal() {
+    setShowModal(false);
+    setEditingId(null);
+    setDuplicateWarning('');
+  }
+
+  function openNew() {
+    setForm({ number: '', date: '', supplier_id: '', notes: '', vat_amount: '', net_amount: '', business_id: user?.business_id ? String(user.business_id) : '' });
+    setItems([]);
+    setEditingId(null);
+    setDuplicateWarning('');
+    setShowModal(true);
+  }
+
+  function openEdit(inv: Invoice) {
+    setForm({
+      number: inv.number,
+      date: inv.date,
+      supplier_id: String(inv.supplier_id),
+      notes: inv.notes || '',
+      vat_amount: inv.vat_amount ? String(inv.vat_amount) : '',
+      net_amount: inv.net_amount ? String(inv.net_amount) : '',
+      business_id: inv.business_id ? String(inv.business_id) : '',
+    });
+    setItems(inv.items.map((it) => ({
+      product_id: it.product_id ? String(it.product_id) : '',
+      description: it.description || '',
+      quantity: String(it.quantity),
+      unit_price: String(it.unit_price),
+    })));
+    setEditingId(inv.id);
+    setDuplicateWarning('');
+    setShowModal(true);
+  }
 
   function addItem() {
     setItems([...items, { product_id: '', description: '', quantity: '', unit_price: '' }]);
@@ -79,36 +124,52 @@ export default function Invoices() {
     }, 0);
   }
 
+  async function checkDuplicate() {
+    if (!form.number || !form.supplier_id) return;
+    try {
+      const params = new URLSearchParams({ number: form.number, supplier_id: form.supplier_id });
+      if (form.date) params.set('date', form.date);
+      const res = await api.get<{ is_duplicate: boolean; message?: string }>(`/api/invoices/check-duplicate?${params}`);
+      if (res.is_duplicate) {
+        setDuplicateWarning(res.message || 'Fattura duplicata trovata!');
+      } else {
+        setDuplicateWarning('');
+      }
+    } catch { /* ignore */ }
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const mappedItems = items.map((it) => ({
-      product_id: Number(it.product_id),
+      product_id: it.product_id ? Number(it.product_id) : null,
       description: it.description || null,
       quantity: parseFloat(it.quantity),
       unit_price: parseFloat(it.unit_price),
       total_price: (parseFloat(it.quantity) || 0) * (parseFloat(it.unit_price) || 0),
     }));
-    createMut.mutate({
+    const payload: Record<string, unknown> = {
       number: form.number,
       date: form.date,
       supplier_id: Number(form.supplier_id),
+      business_id: form.business_id ? Number(form.business_id) : null,
       total_amount: calcTotal(),
       vat_amount: parseFloat(form.vat_amount) || 0,
       net_amount: parseFloat(form.net_amount) || calcTotal(),
       notes: form.notes || null,
       items: mappedItems,
-    });
+    };
+    if (editingId) {
+      updateMut.mutate({ id: editingId, ...payload });
+    } else {
+      createMut.mutate(payload);
+    }
   }
 
   return (
     <>
       <div className="page-header">
         <h2>Fatture</h2>
-        <button className="btn btn-primary" onClick={() => {
-          setForm({ number: '', date: '', supplier_id: '', notes: '', vat_amount: '', net_amount: '' });
-          setItems([]);
-          setShowModal(true);
-        }}>
+        <button className="btn btn-primary" onClick={openNew}>
           <Plus size={16} /> Nuova Fattura
         </button>
       </div>
@@ -139,6 +200,7 @@ export default function Invoices() {
                 <th>Numero</th>
                 <th>Data</th>
                 <th>Fornitore</th>
+                <th>Negozio</th>
                 <th>Righe</th>
                 <th className="text-right">Totale</th>
                 <th></th>
@@ -146,19 +208,21 @@ export default function Invoices() {
             </thead>
             <tbody>
               {invoices.length === 0 ? (
-                <tr><td colSpan={6} className="text-center text-muted">Nessuna fattura</td></tr>
+                <tr><td colSpan={7} className="text-center text-muted">Nessuna fattura</td></tr>
               ) : (
                 invoices.map((inv) => (
                   <tr key={inv.id}>
                     <td><strong>{inv.number}</strong></td>
                     <td>{new Date(inv.date).toLocaleDateString('it-IT')}</td>
                     <td>{inv.supplier?.name}</td>
+                    <td>{inv.business?.name || '—'}</td>
                     <td>{inv.items.length}</td>
                     <td className="text-right font-mono">{fmt(inv.total_amount)}</td>
                     <td>
                       <div className="flex gap-1">
                         <button className="btn btn-secondary btn-sm" onClick={() => setShowDetail(inv)}><Eye size={14} /></button>
-                        <button className="btn btn-danger btn-sm" onClick={() => { if (confirm('Eliminare?')) deleteMut.mutate(inv.id); }}><Trash2 size={14} /></button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => openEdit(inv)} title="Modifica"><Edit size={14} /></button>
+                        <button className="btn btn-danger btn-sm" onClick={() => { if (confirm('Eliminare questa fattura?')) deleteMut.mutate(inv.id); }}><Trash2 size={14} /></button>
                       </div>
                     </td>
                   </tr>
@@ -179,6 +243,7 @@ export default function Invoices() {
             <div className="modal-body">
               <p><strong>Fornitore:</strong> {showDetail.supplier?.name}</p>
               <p><strong>Data:</strong> {new Date(showDetail.date).toLocaleDateString('it-IT')}</p>
+              <p><strong>Negozio:</strong> {showDetail.business?.name || '—'}</p>
               <p><strong>Totale:</strong> {fmt(showDetail.total_amount)}</p>
               {showDetail.notes && <p><strong>Note:</strong> {showDetail.notes}</p>}
               <table style={{ marginTop: '1rem' }}>
@@ -207,18 +272,25 @@ export default function Invoices() {
       )}
 
       {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+        <div className="modal-overlay" onClick={closeModal}>
           <div className="modal" style={{ maxWidth: '700px' }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              Nuova Fattura
-              <button className="btn btn-secondary btn-sm" onClick={() => setShowModal(false)}>X</button>
+              {editingId ? 'Modifica Fattura' : 'Nuova Fattura'}
+              <button className="btn btn-secondary btn-sm" onClick={closeModal}>X</button>
             </div>
             <form onSubmit={handleSubmit}>
               <div className="modal-body">
+                {duplicateWarning && (
+                  <div className="alert alert-warning" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <AlertTriangle size={18} /> {duplicateWarning}
+                  </div>
+                )}
                 <div className="grid-3">
                   <div className="form-group">
                     <label>Numero *</label>
-                    <input className="form-control" required value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} />
+                    <input className="form-control" required value={form.number}
+                      onChange={(e) => setForm({ ...form, number: e.target.value })}
+                      onBlur={checkDuplicate} />
                   </div>
                   <div className="form-group">
                     <label>Data *</label>
@@ -226,13 +298,25 @@ export default function Invoices() {
                   </div>
                   <div className="form-group">
                     <label>Fornitore *</label>
-                    <select className="form-control" required value={form.supplier_id} onChange={(e) => setForm({ ...form, supplier_id: e.target.value })}>
+                    <select className="form-control" required value={form.supplier_id}
+                      onChange={(e) => setForm({ ...form, supplier_id: e.target.value })}
+                      onBlur={checkDuplicate}>
                       <option value="">Seleziona...</option>
                       {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
                   </div>
                 </div>
-                <div className="grid-2">
+                <div className="grid-3">
+                  {isMaster && businesses.length > 0 && (
+                    <div className="form-group">
+                      <label>Negozio</label>
+                      <select className="form-control" value={form.business_id}
+                        onChange={(e) => setForm({ ...form, business_id: e.target.value })}>
+                        <option value="">— Nessuno —</option>
+                        {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      </select>
+                    </div>
+                  )}
                   <div className="form-group">
                     <label>IVA</label>
                     <input type="number" step="0.01" className="form-control" value={form.vat_amount} onChange={(e) => setForm({ ...form, vat_amount: e.target.value })} />
@@ -250,10 +334,11 @@ export default function Invoices() {
 
                 {items.map((it, i) => (
                   <div key={i} className="flex gap-1 items-center" style={{ marginBottom: '0.5rem' }}>
-                    <select className="form-control" style={{ flex: 2 }} required value={it.product_id} onChange={(e) => updateItem(i, 'product_id', e.target.value)}>
+                    <select className="form-control" style={{ flex: 2 }} value={it.product_id} onChange={(e) => updateItem(i, 'product_id', e.target.value)}>
                       <option value="">Prodotto...</option>
                       {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
+                    <input className="form-control" style={{ flex: 1.5 }} placeholder="Descrizione" value={it.description} onChange={(e) => updateItem(i, 'description', e.target.value)} />
                     <input className="form-control" style={{ flex: 1 }} type="number" step="0.01" placeholder="Qtà" required value={it.quantity} onChange={(e) => updateItem(i, 'quantity', e.target.value)} />
                     <input className="form-control" style={{ flex: 1 }} type="number" step="0.01" placeholder="Prezzo" required value={it.unit_price} onChange={(e) => updateItem(i, 'unit_price', e.target.value)} />
                     <span className="font-mono" style={{ minWidth: '80px', textAlign: 'right' }}>
@@ -270,8 +355,10 @@ export default function Invoices() {
                 )}
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>Annulla</button>
-                <button type="submit" className="btn btn-primary">Crea Fattura</button>
+                <button type="button" className="btn btn-secondary" onClick={closeModal}>Annulla</button>
+                <button type="submit" className="btn btn-primary">
+                  {editingId ? 'Salva Modifiche' : 'Crea Fattura'}
+                </button>
               </div>
             </form>
           </div>

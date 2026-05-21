@@ -1,20 +1,14 @@
 import io
-from datetime import date
-from fastapi import APIRouter, Depends, Query
+
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from openpyxl import Workbook
 
 from app.database import get_db
-from app.models import (
-    Invoice,
-    InvoiceItem,
-    Product,
-    ProductCategory,
-    Supplier,
-    PriceQuote,
-)
+from app.models import Invoice, InvoiceItem, Product, ProductCategory, Supplier, PriceQuote, User
+from app.auth import get_current_user, get_business_filter
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
@@ -25,20 +19,25 @@ def export_consumption(
     date_to: str | None = None,
     supplier_id: int | None = None,
     category_id: int | None = None,
+    business_id: int | None = None,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     query = (
         db.query(
-            Product.name,
-            ProductCategory.name,
-            func.sum(InvoiceItem.quantity),
-            func.sum(InvoiceItem.total_price),
+            Product.name, ProductCategory.name,
+            func.sum(InvoiceItem.quantity), func.sum(InvoiceItem.total_price),
             Product.unit,
         )
         .join(InvoiceItem, InvoiceItem.product_id == Product.id)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .outerjoin(ProductCategory, ProductCategory.id == Product.category_id)
     )
+    biz = get_business_filter(current_user)
+    if biz is not None:
+        query = query.filter(Invoice.business_id == biz)
+    elif business_id:
+        query = query.filter(Invoice.business_id == business_id)
     if date_from:
         query = query.filter(Invoice.date >= date_from)
     if date_to:
@@ -74,21 +73,24 @@ def export_price_comparison(
     product_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    business_id: int | None = None,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     query = (
         db.query(
-            Product.name,
-            Supplier.name,
-            Invoice.date,
-            InvoiceItem.unit_price,
-            InvoiceItem.quantity,
-            InvoiceItem.total_price,
+            Product.name, Supplier.name, Invoice.date,
+            InvoiceItem.unit_price, InvoiceItem.quantity, InvoiceItem.total_price,
         )
         .join(InvoiceItem, InvoiceItem.product_id == Product.id)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Supplier, Supplier.id == Invoice.supplier_id)
     )
+    biz = get_business_filter(current_user)
+    if biz is not None:
+        query = query.filter(Invoice.business_id == biz)
+    elif business_id:
+        query = query.filter(Invoice.business_id == business_id)
     if supplier_id:
         query = query.filter(Invoice.supplier_id == supplier_id)
     if product_id:
@@ -111,11 +113,7 @@ def export_price_comparison(
             db.query(PriceQuote.quoted_price)
             .join(Supplier, Supplier.id == PriceQuote.supplier_id)
             .join(Product, Product.id == PriceQuote.product_id)
-            .filter(
-                Supplier.name == supplier_name,
-                Product.name == product_name,
-                PriceQuote.valid_from <= inv_date,
-            )
+            .filter(Supplier.name == supplier_name, Product.name == product_name, PriceQuote.valid_from <= inv_date)
             .filter((PriceQuote.valid_to >= inv_date) | (PriceQuote.valid_to.is_(None)))
             .order_by(PriceQuote.valid_from.desc())
             .first()
@@ -125,12 +123,8 @@ def export_price_comparison(
         diff_pct = (diff / quoted_price * 100) if quoted_price and quoted_price > 0 else None
 
         ws.append([
-            product_name,
-            supplier_name,
-            str(inv_date),
-            round(invoiced_price, 2),
-            round(qty, 2),
-            round(total, 2),
+            product_name, supplier_name, str(inv_date),
+            round(invoiced_price, 2), round(qty, 2), round(total, 2),
             round(quoted_price, 2) if quoted_price else "",
             round(diff, 2) if diff is not None else "",
             round(diff_pct, 1) if diff_pct is not None else "",

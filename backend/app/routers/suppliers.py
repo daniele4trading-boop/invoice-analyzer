@@ -2,14 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Supplier
+from app.models import Supplier, User
 from app.schemas import SupplierCreate, SupplierOut, SupplierUpdate
+from app.auth import get_current_user
 
 router = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
 
 
 @router.get("/", response_model=list[SupplierOut])
-def list_suppliers(skip: int = 0, limit: int = 100, search: str = "", db: Session = Depends(get_db)):
+def list_suppliers(skip: int = 0, limit: int = 100, search: str = "", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = db.query(Supplier)
     if search:
         query = query.filter(Supplier.name.ilike(f"%{search}%"))
@@ -17,7 +18,7 @@ def list_suppliers(skip: int = 0, limit: int = 100, search: str = "", db: Sessio
 
 
 @router.post("/", response_model=SupplierOut, status_code=201)
-def create_supplier(data: SupplierCreate, db: Session = Depends(get_db)):
+def create_supplier(data: SupplierCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     supplier = Supplier(**data.model_dump())
     db.add(supplier)
     db.commit()
@@ -26,7 +27,7 @@ def create_supplier(data: SupplierCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{supplier_id}", response_model=SupplierOut)
-def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
+def get_supplier(supplier_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     supplier = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not supplier:
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
@@ -34,7 +35,7 @@ def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{supplier_id}", response_model=SupplierOut)
-def update_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depends(get_db)):
+def update_supplier(supplier_id: int, data: SupplierUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     supplier = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not supplier:
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
@@ -46,7 +47,7 @@ def update_supplier(supplier_id: int, data: SupplierUpdate, db: Session = Depend
 
 
 @router.delete("/{supplier_id}", status_code=204)
-def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
+def delete_supplier(supplier_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     supplier = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not supplier:
         raise HTTPException(status_code=404, detail="Fornitore non trovato")
